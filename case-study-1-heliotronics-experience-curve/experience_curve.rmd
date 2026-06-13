@@ -1,0 +1,193 @@
+---
+title: "Case Study 1 - Heliotronics : Estimating an Experience Curve"
+author: "Giovanni Carta, Zahra Ghafghazi, Sophia Ropelewski"
+output: html_document
+date: "2026-03-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import the data
+
+First, the data saved in the csv file `Case_Stud_ I.csv` is imported. By inspecting the dataset, we observe that it has 22 observations and 2 variables : the manufacturing cost and the number of solar panels.
+
+
+```{r heliotronics}
+# Import the data
+heliotronics_data <- read.csv("Case_Stud_ I.csv", sep = ";")
+
+# Inspect the data
+print(heliotronics_data)
+
+# Extract the two variables of interest
+cost<-heliotronics_data$manufacturing_cost
+n_sol_panels<- heliotronics_data$number_of_solar_panels
+```
+
+## Question 1 : Scatter plot 
+
+As a first analysis step, a scatter plot is performed on the data, as well as a smooth fitted curve using the $geom\_smooth()$ method. This provides a visual indication of the general trend followed by the data.
+
+```{r scatter}
+library(ggplot2)
+
+ggplot(data = data.frame(n_sol_panels, cost),
+       aes(x = n_sol_panels, y = cost)) +
+  geom_point(shape=17, color = "#166325", size = 3) +
+  geom_smooth() +
+  labs(
+    title = "Experience Curve",
+    x = "Cumulative number of solar panels produced",
+    y = "Manufacturing Cost ($)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+We are interested in studying a relationship of the form $Y = AX^b$, where Y are the average manufacturing cost of the last batch of 100 solar panels at Heliotronics in $ after having produced a cumulative production of X solar panels, b is the experience parameter, and A is cost of the first unit.
+
+As the data is not linear, a log-log transformation is applied on it. The scatter plot is performed again on the transformed data. 
+
+```{r loglog}
+# Log-log plot of the data to check linearity.
+
+ggplot(data = data.frame(n_sol_panels, cost),
+       aes(x = log(n_sol_panels), y = log(cost))) +
+  geom_point(shape = 16, color = "#1f4e79", size = 3) +
+  geom_smooth(method="lm")+
+  labs(
+    title = "Log-log Experience Curve",
+    x = "Log (Cumulative number of solar panels produced)",
+    y = "Log (Manufacturing Cost)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+The curve seems to be indeed linear after applying the log-log transformation. We can now modelise a relationship of the form $y = a+bx$, where $a = log(A)$, $y=log(Y)=log(cost)$, and $x = log(X) = log(n\_sol\_panels)$. On the original scale, this corresponds to the experience curve $Y = AX^b$.
+
+## Question 2 : Linear Regression and learning rate
+
+A linear regression model for $log(cost) = a + b\ log(n\_sol\_panels)$ is estimated using the above transformed data. 
+
+```{r linreg}
+# Modelisation of a linear regression on the log transformed data
+lin_reg <- lm(log(cost) ~ log(n_sol_panels))
+summary(lin_reg)
+
+a <- coef(lin_reg)[1] # intercept, e.g. production cost of the first unit
+b1 <- coef(lin_reg)[2] #slope, e.g. experience parameter
+
+# Replot the scatter plot
+ggplot(data = data.frame(n_sol_panels, cost),
+       aes(x = log(n_sol_panels), y = log(cost))) +
+  geom_point(shape = 16, color = "#1f4e79", size = 3) +
+  #geom_smooth(method = "lm", se = FALSE, color = "#d10f0f", linewidth = 1.2) +
+  geom_abline(intercept = a, slope = b1,
+              color = "#d10f0f", linewidth = 1.2) +
+  labs(
+    title = "Log-log Experience Curve",
+    x = "Log (Cumulative number of solar panels)",
+    y = "Log (Manufacturing Cost)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+From the summary, the intercept is given by $a = 7.8312$, which means that the estimated cost of the first unit (when the cumulative production is 1) is $A = e^a \approx 2520$. The slope is given by $b = −0.151467$. We observe that the p-values are extremely small, which shows that the results are statistically significant. The R-squared, equal to 0.9479, and adjusted R-squared also show that the fit is very good. 
+
+
+Using the above obtained results with the regression model, we can estimate the learning rate. First, we calculate the progress ratio, given by $PR = 2^b$, where $b$ is the experience parameter. It is then possible to obtain the learning rate by calculating $LR = 1 - PR$.
+
+``` {r Learning rate}
+# Progress ratio calculation
+PR <- 2^b1
+paste("The progress ratio is given by", round(PR*100, digits =4), "%")
+
+# Learning rate calculation
+LR <- 1 - PR
+paste("The learning rate is given by", round(LR*100, digits =4), "%")
+
+```
+
+## Question 3 : Average manufacturing cost estimation
+Using the estimated curve from the regression model, an estimation of the average manufacturing cost per solar panel for the 500 produced solar panels can be computed.
+To do this, an estimation of the average production cost per solar panel is calculated for $X = (4600, 4700, 4800, 4900, 5000)$ units using the formula $Y = AX^b$, with $A = e^a$, where $a$ is the previously found intercept. 
+```{r mean }
+# Target X
+X <- c(4600,4700,4800,4900,5000)
+
+# Predicted Y
+Y <- exp(a)*X^b1
+
+print(Y)
+
+paste("The average manufacturing cost per solar panel is:", mean(Y), "$")
+
+```
+
+The obtained average is equal to 697.4052 $. 
+
+## Question 4 : Confidence Interval
+
+In the last question, a 95% confidence interval is calculated for the average manufacturing cost per solar panel for the panels produced for Switzerland using the lower and upper bounds of the confidence interval estimate for the experience parameter $b$. We start by getting the 95% confidence interval of $b$, then, similarly as in the previous question, we calculate $Y_{up} = AX^{b_{up}}$ and $Y_{low} = AX^{b_{low}}$. Finally, we replot the log-log experience curve, with the initial linear regression in red, and two additional linear regressions in blue, given by equations of the form $y = a + b_{up}x$ and $y = a + b_{low}x$.
+
+```{r CI}
+# 95% Confidence interval of the previous calculated linear regression model
+CI=confint(lin_reg)
+print(CI)
+
+b1_min <- CI[2,1] #lower bound slope
+b1_max <- CI[2,2] #upper bound slope
+
+# Lower mean calculation
+Y_low <- exp(a)*X^b1_min
+paste("The lower bound average manufacturing cost per solar panel is:", round(mean(Y_low), digits =4))
+
+# Upper mean calculation
+Y_up <- exp(a)*X^b1_max
+paste("The upper bound average manufacturing cost per solar panel is:", round(mean(Y_up), digits =4))
+
+# Plot of the lower and upper limits
+ggplot(data = data.frame(n_sol_panels, cost),
+       aes(x = log(n_sol_panels), y = log(cost))) +
+  geom_point(shape = 16, color = "#1f4e79", size = 3) +
+  geom_abline(intercept = a, slope = coef(lin_reg)[2],
+              color = "#d10f0f", linewidth = 1.2) +
+  geom_abline(intercept = a, slope = b1_min,
+              color = "#1f4e79", linetype = "dashed", linewidth = 1) +
+  geom_abline(intercept = a, slope = b1_max,
+              color = "#1f4e79", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Log-log Experience Curve",
+    x = "Log (Cumulative number of solar panels)",
+    y = "Log (Manufacturing Cost)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  )
+```
