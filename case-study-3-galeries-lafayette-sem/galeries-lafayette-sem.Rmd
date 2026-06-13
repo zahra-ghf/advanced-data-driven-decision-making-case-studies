@@ -1,0 +1,1745 @@
+---
+title: "Case Study 3: Structural Equation Modelling"
+subtitle: "Brand Equity Drivers at Galeries Lafayette Berlin"
+author: "Giovanni Carta, Zahra Ghafghazi, Sophia Ropelewski"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: kable
+    fig_width: 9
+    fig_height: 5.5
+---
+
+```{css, echo=FALSE}
+body { font-size: 14px; }
+h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 8px; }
+h2 { color: #2980b9; margin-top: 28px; }
+h3 { color: #34495e; }
+.interpretation {
+  background: #eaf4fb;
+  border-left: 4px solid #3498db;
+  padding: 12px 16px; margin: 14px 0;
+  border-radius: 0 6px 6px 0; font-size: 0.93em;
+}
+.decision {
+  background: #eafaf1;
+  border-left: 4px solid #27ae60;
+  padding: 12px 16px; margin: 14px 0;
+  border-radius: 0 6px 6px 0; font-size: 0.93em;
+}
+.warning-box {
+  background: #fef9e7;
+  border-left: 4px solid #f39c12;
+  padding: 12px 16px; margin: 14px 0;
+  border-radius: 0 6px 6px 0; font-size: 0.93em;
+}
+/* === Revision markers (added in revised version) === */
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+set.seed(2025) 
+```
+
+---
+
+
+---
+
+# 0. Setup & Data Loading
+
+Loads all R packages needed for EFA, CFA, and SEM.
+
+```{r packages}
+library(tidyverse)
+library(psych)
+library(lavaan)
+library(semPlot)
+library(GPArotation)
+library(corrplot)
+library(knitr)
+library(kableExtra)
+library(tibble)
+```
+
+We first load the data. 
+
+```{r load-data}
+data_raw <- read_csv("Case Study III_Structural Equation Modeling.csv")
+cat("Dataset dimensions:", nrow(data_raw), "rows x", ncol(data_raw), "columns\n")
+```
+
+When inspecting the data, we see that there are 999 values present. We decide to replace all `999` with `NA` so they are excluded from calculations, handled later by the model.
+
+```{r clean-data}
+data_raw <- data_raw %>% mutate(across(everything(), ~ na_if(., 999)))
+
+na_counts <- colSums(is.na(data_raw))
+na_pct    <- round(na_counts / nrow(data_raw) * 100, 1)
+
+data.frame(Variable = names(na_counts), N_Missing = na_counts, Pct = na_pct) %>%
+  filter(N_Missing > 0) %>% arrange(desc(Pct)) %>%
+  kbl(caption = "Missing values per variable", row.names = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+
+Doing a more throughout check, we see that missing values are present in several variables, with a maximum of 7.2% missing in SAT_3. All models use `missing = "fiml"` (Full Information Maximum Likelihood), which retains all 553 observations without list-wise deletion or imputation. FIML is the recommended approach for SEM with incomplete data.
+
+
+```{r subsets}
+image_data <- data_raw %>% select(Im1:Im22)
+```
+
+---
+
+# 1. Exploratory Factor Analysis (EFA)
+
+## 1.1 Pre-tests: KMO and Bartlett
+
+Next, we need to check if we can apply factor analysis for the data. therefore, we check the following: KMO must be > 0.70; Bartlett must reject H0 (p < 0.05).
+
+```{r pretests, fig.height=7, fig.width=7}
+## factorability checks
+cor_image <- cor(image_data, use = "pairwise.complete.obs")
+
+kmo_result <- KMO(cor_image)
+cat("Overall KMO (MSA):", round(kmo_result$MSA, 3), "\n")
+
+bart <- cortest.bartlett(cor_image, n = nrow(na.omit(image_data)))
+cat("Bartlett Chi2:", round(bart$chisq, 2), "| df:", bart$df,
+    "| p:", format(bart$p.value, scientific = TRUE), "\n")
+
+corrplot(cor_image, method = "color", type = "upper", tl.cex = 0.72,
+         col  = colorRampPalette(c("#c0392b","white","#2980b9"))(200),
+         title = "Pairwise Correlation Matrix - Image Items Im1-Im22",
+         mar   = c(0, 0, 2, 0))
+```
+
+
+The overall KMO (MSA) is **0.881**, indicating good factorability. Bartlett's test is highly significant (p < 0.001), confirming that the correlation matrix is not an identity matrix. Both tests confirm that EFA is appropriate for this data.
+
+
+## 1.2 Factor Retention
+
+Now we need to get an idea of the number of factors for our analysis. Therefore, we compute eigenvalues, scree plot and runs parallel analysis to determine how many factors to extract.
+
+```{r scree, fig.height=4.5}
+#kaiser
+eigen_vals <- eigen(cor_image)$values
+
+data.frame(Factor = seq_along(eigen_vals),
+           Eigenvalue = round(eigen_vals, 3),
+           Cum_Var_Pct = round(cumsum(eigen_vals) / sum(eigen_vals) * 100, 1)) %>%
+  kbl(caption = "Eigenvalues and cumulative variance explained") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(which(eigen_vals >= 1), bold = TRUE, background = "#d6eaf8")
+```
+
+```{r scree-plot, fig.height=4.5}
+#scree plot
+ev_df <- data.frame(Factor = seq_along(eigen_vals), EV = eigen_vals)
+
+ggplot(ev_df, aes(x = Factor, y = EV)) +
+  geom_line(color = "#2980b9", linewidth = 1.1) +
+  geom_point(aes(color = EV > 1), size = 3.5) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "#c0392b", linewidth = 0.8) +
+  scale_color_manual(values = c("FALSE" = "grey70", "TRUE" = "#e74c3c"),
+                     labels = c("FALSE" = "EV < 1", "TRUE" = "EV >= 1 (Kaiser)"), name = NULL) +
+  scale_x_continuous(breaks = 1:22) +
+  labs(title = "Scree Plot - 22 Image Items",
+       subtitle = "Red dashed line = Kaiser criterion (EV = 1)",
+       x = "Factor Number", y = "Eigenvalue") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+```
+
+```{r parallel, fig.height=5}
+# parallel analysis
+fa.parallel(image_data, fa = "fa", fm = "minres", n.iter = 5,
+            main = "Parallel Analysis - Factor Retention")
+```
+
+
+The Kaiser criterion (eigenvalue > 1) here points to 6 factors, parallel analysis recommends 7-8. We try different solutions in the next part.
+
+
+## 1.3 Varimax Exploration (Orthogonal Rotation)
+
+We first inspect multiple solutions with Varimax (orthogonal) rotation across different numbers of factors. Varimax assumes factors are uncorrelated. We try out : 5, 6, 7, 8 and 9 factors solution.
+
+```{r varimax-solutions}
+# trying out several solutions
+efa_5_v <- fa.sort(fa(image_data, nfactors = 5, rotate = "varimax", fm = "pa", use = "pairwise"))
+efa_6_v <- fa.sort(fa(image_data, nfactors = 6, rotate = "varimax", fm = "pa", use = "pairwise"))
+efa_7_v <- fa.sort(fa(image_data, nfactors = 7, rotate = "varimax", fm = "pa", use = "pairwise"))
+efa_8_v <- fa.sort(fa(image_data, nfactors = 8, rotate = "varimax", fm = "pa", use = "pairwise"))
+efa_9_v <- fa.sort(fa(image_data, nfactors = 9, rotate = "varimax", fm = "pa", use = "pairwise"))
+
+cat("=== 5-Factor Varimax ===\n"); print(efa_5_v$loadings, cutoff = 0.30)
+cat("\n=== 6-Factor Varimax ===\n"); print(efa_6_v$loadings, cutoff = 0.30)
+cat("\n=== 7-Factor Varimax ===\n"); print(efa_7_v$loadings, cutoff = 0.30)
+cat("\n=== 8-Factor Varimax ===\n"); print(efa_8_v$loadings, cutoff = 0.30)
+cat("\n=== 9-Factor Varimax ===\n"); print(efa_9_v$loadings, cutoff = 0.30)
+```
+
+
+**Summary of Varimax solutions:**
+
+
+- **5 factors:** substantial cross-loadings throughout, shows clear under-factoring.
+- **6 factors:** still several problematic cross-loaders (Im17, Im18, Im15, Im9, Im6, Im7, Im16, Im19).
+- **7 factors:** cleaner structure: each factor has at least 2 items loading distinctly. Residual cross-loaders: Im16, Im19 (low main loadings), Im8, Im9.
+- **8 factors:** the eighth factor is defined by a single item with two weak secondary loaders, could suggest over-factoring.
+- **9 factors:** only one item loads cleanly on the ninth factor: overfactoring.
+
+The **7-factor solution** provides the best balance of parsimony and interpretability and is retained for further refinement.
+
+
+```{r factor-count-comparison-quant}
+# comparing the tried out solutions
+compare_efa_quant <- function(fa_obj, nf) {
+  ld <- unclass(fa_obj$loadings)
+  abs_ld <- abs(ld)
+  primary <- apply(abs_ld, 1, max)
+  cross   <- apply(abs_ld, 1, function(x) sort(x, decreasing = TRUE)[2] > 0.30)
+  vc <- fa_obj$Vaccounted
+  data.frame(
+    N_Factors        = nf,
+    Cum_Var_Pct      = round(vc[3, ncol(vc)] * 100, 1),
+    Mean_Communality = round(mean(fa_obj$communality), 3),
+    Items_h2_lt_040  = sum(fa_obj$communality < 0.40),
+    Items_Weak_Prim  = sum(primary < 0.40),
+    Cross_Loaders    = sum(cross)
+  )
+}
+
+efa_quant_compare <- bind_rows(
+  compare_efa_quant(efa_5_v, 5),
+  compare_efa_quant(efa_6_v, 6),
+  compare_efa_quant(efa_7_v, 7),
+  compare_efa_quant(efa_8_v, 8)
+)
+
+efa_quant_compare %>%
+  kbl(caption = "Quantitative comparison of 5, 6, 7, 8 factor Varimax solutions",
+      col.names = c("N Factors","Cum Var %","Mean h²",
+                    "Items h²<0.40","Weak primary","Cross-loaders")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(3, bold = TRUE, background = "#d5f5e3")
+```
+
+
+### 1.3.1 Item Refinement — Step 1: Remove Im16 and Im19
+
+Im16 ("Professional Appearance Towards Customers") and Im19 ("Professional Organisation") both exhibit low primary loadings (< 0.45) and cross-loadings. This might suggest that they do not belong to a single clear dimension. The decision is taken to remove them.
+
+```{r varimax-clean-a}
+# remove 16 and 19
+image_data_A <- image_data %>% select(-Im16, -Im19)
+
+efa_7_A <- fa.sort(fa(image_data_A, nfactors = 7, rotate = "varimax",
+                      fm = "pa", use = "pairwise"))
+cat("=== 7-Factor Varimax: after removing Im16 & Im19 ===\n")
+print(efa_7_A$loadings, cutoff = 0.30)
+```
+
+### 1.3.2 Item Refinement — Step 2: Remove Im8 (keeping Im16, Im19 already gone)
+
+Im8 ("Expertise in French Traditional Cuisine") continues to show similar loadings across two factors, making factor assignment ambiguous. We remove it and check the resulting structure with 7 factors.
+
+```{r varimax-clean-b}
+# remove 8
+image_data_B <- image_data %>% select(-Im16, -Im19, -Im8)
+
+efa_7_B <- fa.sort(fa(image_data_B, nfactors = 7, rotate = "varimax",
+                      fm = "pa", use = "pairwise"))
+cat("=== 7-Factor Varimax: after removing Im16, Im19 & Im8 ===\n")
+print(efa_7_B$loadings, cutoff = 0.30)
+```
+
+
+The structure is considerably cleaner without Im16, Im19 and Im8. Im9 ("French Fashion") still shows a modest loading on the French Identity factor with some secondary loading, and will be evaluated more carefully in the oblique rotation comparison below.
+
+
+## 1.4 Final EFA: Oblique Rotation (Oblimin)
+
+Since image perceptions in a retail context are conceptually related (e.g., luxury and decoration overlap), we expect the factors to correlate. An **oblique Oblimin rotation** is therefore more appropriate than Varimax, as it relaxes the independence assumption and yields a cleaner pattern matrix for correlated constructs.
+
+We compare two candidate item sets to decide whether to retain or drop Im9:
+
+- **Candidate A:** remove Im16, Im19, Im8, Im9
+- **Candidate B (chosen):** remove Im16, Im19, Im8 but retain Im9
+
+```{r oblimin-candidate-a}
+# Candidate A: remove Im16, Im19, Im8, Im9
+image_data_noIm9 <- image_data %>% select(-Im16, -Im19, -Im8, -Im9)
+
+efa_7_obA <- fa.sort(fa(image_data_noIm9, nfactors = 7, rotate = "oblimin",
+                        fm = "minres", use = "pairwise"))
+
+cat("=== Candidate A: 7-Factor Oblimin, -Im16/-Im19/-Im8/-Im9 ===\n")
+print(efa_7_obA$loadings, cutoff = 0.30)
+cat("\nPhi matrix:\n")
+print(round(efa_7_obA$Phi, 3))
+cat("\nCommunalities:\n")
+print(round(efa_7_obA$communality, 3))
+```
+
+```{r oblimin-candidate-b}
+# Candidate B (CHOSEN): remove Im16, Im19, Im8, retain Im9
+image_data_clean <- image_data %>% select(-Im16, -Im19, -Im8)
+
+efa_7_obB <- fa.sort(fa(image_data_clean, nfactors = 7, rotate = "oblimin",
+                        fm = "minres", use = "pairwise"))
+
+cat("=== Candidate B (CHOSEN): 7-Factor Oblimin, -Im16/-Im19/-Im8 (Im9 retained) ===\n")
+print(efa_7_obB$loadings, cutoff = 0.30)
+cat("\nPhi matrix:\n")
+print(round(efa_7_obB$Phi, 3))
+cat("\nCommunalities:\n")
+print(round(efa_7_obB$communality, 3))
+```
+
+
+**Chosen solution: Candidate B**, 7 factors, Oblimin rotation, Im16, Im19 and Im8 removed, with Im9 retained.
+
+**Reasons to keep Im9 for now:**
+
+- Im9 ("French Fashion") loads exclusively on the French Identity factor with no cross-loadings in the oblimin solution.
+- Its communality is modest but above the minimum threshold of 0.30. Removing it would leave French Identity with only two items, weakening the factor.
+- We prefer not to be overly aggressive with item removal at the EFA stage. Im9 will be re-evaluated in CFA where its fit can be tested more rigorously.
+
+**Reasons for Oblimin over Varimax:**
+
+The Phi matrix shows inter-factor correlations mostly in the 0.30–0.60 range, confirming that the factors are correlated and oblique rotation is the appropriate choice. Varimax's orthogonality assumption would distort the solution.
+
+
+```{r promax-vs-oblimin}
+# promax test for completness
+# Promax counterpart of Candidate B
+efa_7_promax <- fa.sort(fa(image_data_clean, nfactors = 7, rotate = "promax",
+                           fm = "minres", use = "pairwise"))
+
+# Quantitative comparison
+rot_compare <- data.frame(
+  Rotation         = c("Oblimin", "Promax"),
+  Cum_Var_Pct      = round(c(efa_7_obB$Vaccounted[3, 7], efa_7_promax$Vaccounted[3, 7]) * 100, 1),
+  Mean_Communality = round(c(mean(efa_7_obB$communality), mean(efa_7_promax$communality)), 3),
+  Phi_Min_OffDiag  = round(c(min(efa_7_obB$Phi[upper.tri(efa_7_obB$Phi)]),
+                             min(efa_7_promax$Phi[upper.tri(efa_7_promax$Phi)])), 3),
+  Phi_Max_OffDiag  = round(c(max(efa_7_obB$Phi[upper.tri(efa_7_obB$Phi)]),
+                             max(efa_7_promax$Phi[upper.tri(efa_7_promax$Phi)])), 3)
+)
+
+rot_compare %>%
+  kbl(caption = "Oblimin vs Promax — same item set, same factor count",
+      col.names = c("Rotation","Cum. Var. %","Mean h²",
+                    "Min |Phi| off-diag","Max |Phi| off-diag")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(1, bold = TRUE, background = "#d5f5e3")
+
+cat("\n=== Promax loadings (for comparison) ===\n")
+print(efa_7_promax$loadings, cutoff = 0.30)
+cat("\n=== Promax Phi matrix ===\n")
+print(round(efa_7_promax$Phi, 3))
+```
+
+
+**Difference between Promax vs Oblimin:** Both rotations achieve clean simple structure and identical item-to-factor assignment. Promax, however, inflates the inter-factor correlations through its *k* = 4 power transform. Oblimin's correlation range (typically 0.22–0.55) is a more realistic representation of how brand-image dimensions actually relate to each other in retail data. Since loadings are essentially identical, the more conservative rotation is the better default.
+
+
+
+## 1.5 Final EFA Solution (7 Factors, Oblimin)
+
+The final solution chosen for EFA is presented in this section, with loading matrix, factor intercorrelations and communalities (Candidate B: Im16, Im19, Im8 removed; Im9 retained).
+
+```{r efa-final}
+# print the loadings
+efa_final <- efa_7_obB
+
+# Full loading matrix
+print(efa_final$loadings, cutoff = 0.30)
+```
+
+```{r efa-phi, fig.height=5.5}
+# print phi matrix, and already assign tentative names for the factors
+phi_mat <- round(efa_final$Phi, 3)
+
+phi_labels <- c("Decoration","Assortment","Atmosphere",
+                "Luxury","FrenchId","Trendy","Gourmet")
+rownames(phi_mat) <- phi_labels
+colnames(phi_mat) <- phi_labels
+
+phi_df <- as.data.frame(phi_mat) %>%
+  rownames_to_column("Factor_Row") %>%
+  pivot_longer(-Factor_Row, names_to = "Factor_Col", values_to = "r") %>%
+  mutate(
+    Factor_Row = factor(Factor_Row, levels = phi_labels),
+    Factor_Col = factor(Factor_Col, levels = rev(phi_labels)),
+    label      = ifelse(Factor_Row == Factor_Col, "1.00", sprintf("%.2f", r)),
+    is_diag    = Factor_Row == Factor_Col
+  )
+
+ggplot(phi_df, aes(x = Factor_Row, y = Factor_Col, fill = r)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(aes(label = label,
+                fontface = ifelse(is_diag, "plain", "bold"),
+                color    = ifelse(abs(r) > 0.45 & !is_diag, "white", "grey20")),
+            size = 4.0) +
+  scale_fill_gradient2(
+    low      = "#2980b9",
+    mid      = "#f0f4f8",
+    high     = "#c0392b",
+    midpoint = 0,
+    limits   = c(-1, 1),
+    name     = "Correlation"
+  ) +
+  scale_color_identity() +
+  scale_x_discrete(position = "top") +
+  coord_fixed(clip="off") +
+  labs(
+    title    = "Factor Intercorrelation Matrix (Phi) — Oblimin EFA",
+    subtitle = "Values show pairwise correlations between latent factors",
+    x = NULL, y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 13),
+    plot.subtitle   = element_text(color = "grey40", size = 10, margin=margin(b=22)),
+    axis.text.x.top      = element_text(face = "bold", angle = 30, hjust = 0, size = 10),
+    axis.text.y     = element_text(face = "bold", size = 10),
+    panel.grid      = element_blank(),
+    legend.position = "right"
+  )
+```
+
+Factor correlations range from 0.22 to 0.55. Values consistently above 0.30 confirm that oblique rotation was the correct choice. Orthogonal Varimax would have forced artificial independence between correlated constructs and distorted the solution.
+
+
+```{r efa-heatmap, fig.height=7}
+#heatmap of the loadings
+factor_names <- c("MV1"="Luxury","MV2"="Gourmet","MV3"="Atmosphere",
+                  "MV4"="Decoration","MV5"="Assortment","MV6"="Trendy","MV7"="FrenchId")
+
+# Rename columns of loadings matrix
+ld_raw <- as.data.frame(unclass(efa_final$loadings))
+# Try to rename based on actual column names
+actual_cols <- colnames(ld_raw)
+factor_labels <- paste0("F", 1:7)
+names(factor_labels) <- actual_cols
+
+ld_df <- ld_raw %>%
+  rownames_to_column("Item") %>%
+  pivot_longer(-Item, names_to = "Factor", values_to = "Loading") %>%
+  mutate(Factor = recode(Factor, !!!setNames(factor_labels, actual_cols)))
+
+item_order <- ld_df %>%
+  group_by(Item) %>%
+  slice_max(abs(Loading), n = 1, with_ties = FALSE) %>%
+  arrange(Factor, desc(abs(Loading))) %>%
+  pull(Item)
+
+ld_df %>%
+  mutate(Item = factor(Item, levels = rev(item_order))) %>%
+  ggplot(aes(x = Factor, y = Item, fill = Loading)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = ifelse(abs(Loading) >= 0.30, sprintf("%.2f", Loading), "")),
+            size = 2.9, fontface = "bold") +
+  scale_fill_gradient2(low = "#c0392b", mid = "white", high = "#2980b9",
+                       midpoint = 0, limits = c(-1, 1), name = "Loading") +
+  labs(title    = "Oblimin Factor Loadings - Final 7-Factor EFA",
+       subtitle = "Only loadings |>= 0.30| labelled | Removed: Im8, Im16, Im19",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(),
+        axis.text.x = element_text(face = "bold", angle = 20, hjust = 1),
+        plot.title  = element_text(face = "bold"))
+```
+
+```{r efa-communalities, fig.height=5}
+# communality plot
+data.frame(Item = names(efa_final$communality),
+           h2   = as.numeric(efa_final$communality)) %>%
+  mutate(Quality = case_when(h2 >= 0.50 ~ "Good",
+                             h2 >= 0.40 ~ "Acceptable",
+                             TRUE       ~ "Weak")) %>%
+  ggplot(aes(x = reorder(Item, h2), y = h2, fill = Quality)) +
+  geom_col(width = 0.75) +
+  geom_hline(yintercept = 0.50, linetype="dashed", color="#c0392b", linewidth=0.7) +
+  geom_hline(yintercept = 0.40, linetype="dotted", color="#e67e22", linewidth=0.7) +
+  coord_flip() +
+  scale_fill_manual(values = c("Good"="#27ae60","Acceptable"="#f39c12","Weak"="#e74c3c")) +
+  labs(title = "Item Communalities - Final EFA", x = NULL, y = "h2") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "top")
+```
+
+After EFA, we can identify those 7 factors:
+
+**Seven dimensions of Galeries Lafayette brand image:**
+
+
+1. **Decoration** (Im3, Im4, Im5) : artistic and creative visual merchandising
+2. **Assortment** (Im1, Im2, Im15) : breadth and professional curation of range
+3. **Atmosphere** (Im20, Im21, Im22) ; relaxing, intimate shopping environment
+4. **Luxury** (Im11, Im12, Im13) : luxury brands and high-quality cosmetics 
+5. **French Identity** (Im6, Im7) : embodiment of France and savoir-vivre
+6. **Trendy** (Im17, Im18) : trendy, hip positioning
+7. **Gourmet** (Im10, Im14) : gourmet food and specialities
+
+All seven factors have clear marketing interpretations and zero cross-loading items.
+
+**Concerning Im11 (Luxury factor):** Im11 shows a communality below the 0.50 threshold, meaning the seven-factor solution explains a relatively limited share of its variance. However, we decided to not drop it for now, because it loads cleanly on the Luxury factor with no cross-loadings and removing it would leave Luxury with only two items (Im12 and Im13). Therefore we decide to retain Im11 in the EFA solution and re-evaluate it in CFA. 
+
+
+---
+
+# 2. Confirmatory Factor Analysis (CFA)
+
+## 2.1 Comparison of different CFA solutions.
+
+After EFA, we continue with confirmatory factor analysis (CFA). Here, three CFA models are estimated in sequence. After each model, the modification indices are inspected to identify theoretically justified improvements, providing explicit justification for every change made. The MLR estimator was used for robust standard errors and fit statistics in the presence of potential non-normality, and for missingness we chose to apply "fiml".
+
+```{r cfa-model1}
+# first model
+cfa_m1 <- '
+  Image_Decoration     =~ Im4 + Im3 + Im5
+  Image_Assortment     =~ Im1 + Im2 + Im15
+  Image_Atmosphere     =~ Im20 + Im22 + Im21
+  Image_Luxury         =~ Im12 + Im13 + Im11
+  Image_FrenchIdentity =~ Im7 + Im6 + Im9
+  Image_Trendy         =~ Im17 + Im18
+  Image_Gourmet        =~ Im10 + Im14
+'
+fit1 <- cfa(cfa_m1, data = data_raw, estimator = "MLR", missing = "fiml")
+
+fm1 <- fitMeasures(fit1, c("chisq","df","cfi","tli","rmsea","srmr"))
+data.frame(Index = names(fm1), Value = round(as.numeric(fm1), 3)) %>%
+  kbl(caption = "Model 1 (Initial) — Fit Indices", col.names = c("Index","Value")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE, position = "left")
+```
+
+```{r modif1}
+# mod. index of the first model
+modindices(fit1, sort. = TRUE) %>%
+  filter(mi > 10) %>%
+  select(lhs, op, rhs, mi, epc, sepc.all) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  kbl(caption = "Modification indices > 10 (Model 1 — Initial CFA)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+
+Fit is reasonable but can be improved. The largest modification index suggests freeing the residual covariance between **Im1** and **Im2** (Large Assortment and Assortment Variety). This is theoretically justified: both items refer to the breadth of the product range with slightly different wording, so some overlap in their unique variances beyond the shared Assortment factor is expected. So we allow them to correlate with each other in the next model (e.g. no directional effect).
+
+
+```{r cfa-model2}
+# the second model with Im1 and Im2 having correlation between them
+cfa_m2 <- '
+  Image_Decoration     =~ Im4 + Im3 + Im5
+  Image_Assortment     =~ Im1 + Im2 + Im15
+  Image_Atmosphere     =~ Im20 + Im22 + Im21
+  Image_Luxury         =~ Im12 + Im13 + Im11
+  Image_FrenchIdentity =~ Im7 + Im6 + Im9
+  Image_Trendy         =~ Im17 + Im18
+  Image_Gourmet        =~ Im10 + Im14
+  Im1 ~~ Im2
+'
+fit2 <- cfa(cfa_m2, data = data_raw, estimator = "MLR", missing = "fiml")
+
+fm2 <- fitMeasures(fit2, c("chisq","df","cfi","tli","rmsea","srmr"))
+data.frame(Index = names(fm2), Value = round(as.numeric(fm2), 3)) %>%
+  kbl(caption = "Model 2 (+Im1~~Im2) — Fit Indices", col.names = c("Index","Value")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE, position = "left")
+```
+
+```{r modif2}
+# mod index of second model
+modindices(fit2, sort. = TRUE) %>%
+  filter(mi > 10) %>%
+  select(lhs, op, rhs, mi, epc, sepc.all) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  kbl(caption = "Modification indices > 10 (Model 2 — after Im1~~Im2)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+
+Fit improves but RMSEA and TLI remain slightly below ideal thresholds. The modification indices now highlight **Im9** cross-loading onto multiple factors. This was already an item that was flagged in the EFA. Given this evidence from both EFA and the CFA modification indices, we remove Im9. French Identity remains defined by Im7 ("French Savoir-vivre") and Im6 ("France"), both of which have strong loadings.
+
+
+```{r cfa-model3}
+# 3rd model without Im9
+cfa_m3_with_Im11 <- '
+  Image_Decoration     =~ Im4 + Im3 + Im5
+  Image_Assortment     =~ Im1 + Im2 + Im15
+  Image_Atmosphere     =~ Im20 + Im22 + Im21
+  Image_Luxury         =~ Im12 + Im13 + Im11
+  Image_FrenchIdentity =~ Im7 + Im6
+  Image_Trendy         =~ Im17 + Im18
+  Image_Gourmet        =~ Im10 + Im14
+  Im1 ~~ Im2
+'
+fit_m3_with_Im11 <- cfa(cfa_m3_with_Im11, data = data_raw,
+                        estimator = "MLR", missing = "fiml")
+
+fm3 <- fitMeasures(fit_m3_with_Im11, c("chisq","df","cfi","tli","rmsea","srmr"))
+data.frame(Index = names(fm3), Value = round(as.numeric(fm3), 3)) %>%
+  kbl(caption = "Model 3 (-Im9, with Im11) - Fit Indices", col.names = c("Index","Value")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE, position = "left")
+```
+
+```{r modif3}
+# mod index of model 3
+modindices(fit_m3_with_Im11, sort. = TRUE) %>%
+  filter(mi > 10) %>%
+  select(lhs, op, rhs, mi, epc, sepc.all) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  kbl(caption = "Modification indices > 10 (Model 3 — with Im11)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+
+No remaining modification index provides both a large MI value and a theoretically meaningful justification. But we still want to test the item Im11 which was flagged at the end of Section 1, below.
+
+
+## 2.1.1 Item 11 Retention test (Model 3 vs Model 4)
+
+
+```{r cfa-model4-no-Im11}
+# model 4 without item 11
+cfa_m4_no_Im11 <- '
+  Image_Decoration     =~ Im4 + Im3 + Im5
+  Image_Assortment     =~ Im1 + Im2 + Im15
+  Image_Atmosphere     =~ Im20 + Im22 + Im21
+  Image_Luxury         =~ Im12 + Im13
+  Image_FrenchIdentity =~ Im7 + Im6
+  Image_Trendy         =~ Im17 + Im18
+  Image_Gourmet        =~ Im10 + Im14
+  Im1 ~~ Im2
+'
+fit_m4_no_Im11 <- cfa(cfa_m4_no_Im11, data = data_raw,
+                      estimator = "MLR", missing = "fiml")
+```
+
+```{r cfa-im11-test}
+# fit measurement comparison
+calc_cr_ave <- function(fit_obj, factor_name) {
+  ld <- standardizedSolution(fit_obj) %>%
+    filter(op == "=~", lhs == factor_name) %>%
+    pull(est.std)
+  cr  <- sum(ld)^2 / (sum(ld)^2 + sum(1 - ld^2))
+  ave <- mean(ld^2)
+  c(N_items = length(ld), CR = round(cr, 3), AVE = round(ave, 3))
+}
+
+im11_fit_compare <- rbind(
+  "Model 3 - with Im11" = fitMeasures(fit_m3_with_Im11,
+                                      c("chisq","df","cfi","tli","rmsea","srmr","aic")),
+  "Model 4 - no Im11"   = fitMeasures(fit_m4_no_Im11,
+                                      c("chisq","df","cfi","tli","rmsea","srmr","aic"))
+) %>% round(3) %>% as.data.frame()
+
+im11_fit_compare$Luxury_CR  <- c(calc_cr_ave(fit_m3_with_Im11, "Image_Luxury")["CR"],
+                                 calc_cr_ave(fit_m4_no_Im11,   "Image_Luxury")["CR"])
+im11_fit_compare$Luxury_AVE <- c(calc_cr_ave(fit_m3_with_Im11, "Image_Luxury")["AVE"],
+                                 calc_cr_ave(fit_m4_no_Im11,   "Image_Luxury")["AVE"])
+
+im11_fit_compare %>%
+  kbl(caption = "Im11 retention test - fit & convergent validity",
+      col.names = c("chi2","df","CFI","TLI","RMSEA","SRMR","AIC","Luxury CR","Luxury AVE")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(2, bold = TRUE, background = "#d5f5e3")
+```
+
+```{r modif-model4}
+# modification index of model 4
+modindices(fit_m4_no_Im11, sort. = TRUE) %>%
+  filter(mi > 10) %>%
+  select(lhs, op, rhs, mi, epc, sepc.all) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  kbl(caption = "Modification indices > 10 (Model 4 — Final CFA without Im11)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+
+
+**Decision: drop Im11.** All fit indices improve when Im11 is removed. The most striking change is in **Luxury AVE**, which goes from 0.62 to 0.75 (+ 21 %), with CR also improving from 0.83 to 0.86. The standardised loading of Im11 itself is only ≈ 0.61, which is below the 0.70 cut-off. "High-quality cosmetics" is conceptually closer to a quality/assortment dimension than to a luxury-brand dimension, which could be reason why its loading was borderline. 
+
+
+
+```{r cfa-final-assignment}
+# Final CFA model = Model 4 (no Im11). 
+cfa_final <- cfa_m4_no_Im11
+fit_cfa   <- fit_m4_no_Im11
+fit3      <- fit_m3_with_Im11   # kept for backward-compat with the fit-comparison table below
+```
+
+
+## 2.2 Fit Comparison
+
+The table below compares fit indices across the four CFA models. Acceptable thresholds are CFI > 0.95, TLI > 0.95, RMSEA < 0.05.
+
+```{r cfa-fit-table}
+# comparison table for all fit measurement
+get_fit <- function(fit_obj) {
+  fm <- fitMeasures(fit_obj, c("chisq","df","cfi","tli","rmsea",
+                               "rmsea.ci.lower","rmsea.ci.upper","srmr"))
+  c(chi2df   = round(unname(fm["chisq"]) / unname(fm["df"]), 3),
+    cfi      = round(unname(fm["cfi"]),             3),
+    tli      = round(unname(fm["tli"]),             3),
+    rmsea    = round(unname(fm["rmsea"]),            3),
+    rmsea_lo = round(unname(fm["rmsea.ci.lower"]),   3),
+    rmsea_hi = round(unname(fm["rmsea.ci.upper"]),   3),
+    srmr     = round(unname(fm["srmr"]),             3))
+}
+
+rbind("Model 1 - Initial"           = get_fit(fit1),
+      "Model 2 - +Im1~~Im2"         = get_fit(fit2),
+      "Model 3 - -Im9 (with Im11)"  = get_fit(fit3),
+      "Model 4 - Final (-Im11)"     = get_fit(fit_cfa)) %>%
+  as.data.frame() %>%
+  setNames(c("Chi2/df","CFI","TLI","RMSEA","RMSEA lo","RMSEA hi","SRMR")) %>%
+  kbl(caption = "CFA model fit progression") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(4, bold = TRUE, background = "#d5f5e3")
+```
+
+
+The final CFA model (Model 4: 7 factors, Im11 removed) achieves CFI ≈ 0.983, TLI ≈ 0.976, RMSEA ≈ 0.046 and SRMR ≈ 0.030. We continue forward with this model.
+
+
+```{r cfa-full-summary}
+# get the full summary of the model
+summary(fit_cfa, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE)
+```
+
+```{r cfa-diagram, fig.height=9, fig.width=11, fig.cap="CFA Final Model"}
+# draw the latent factors, and the items which are loading on temp
+cfa_node_labels <- c(
+  "Im4","Im3","Im5",
+  "Im1","Im2","Im15",
+  "Im20","Im22","Im21",
+  "Im12","Im13",
+  "Im7","Im6",
+  "Im17","Im18",
+  "Im10","Im14",
+  "Decortn","Assrtmt","Atmosph","Luxury","FrenchId","Trendy","Gourmet"
+)
+
+semPaths(fit_cfa, what="std", whatLabels="std", layout="tree2", rotation=2,
+         style="lisrel", residuals=FALSE, intercepts=FALSE,
+         nCharNodes=0, nodeLabels=cfa_node_labels,
+         sizeLat=9, sizeMan=5, edge.label.cex=0.9,
+         label.cex=1.0, curvePivot=FALSE, cardinal=FALSE,
+         exoCov=FALSE, weighted=FALSE,
+         mar=c(1, 6, 2, 1),
+         main="CFA Final Model - Standardised Loadings")
+```
+
+
+Each circle represents a latent factor and each rectangle an observed survey item. The number on each arrow is the standardised loading. 
+
+
+## 2.3 Standardised Loadings and Reliability
+
+The table below presents the standardised factor loadings, standard errors, and item-level R² for the final CFA model, followed by Composite Reliability (CR ≥ 0.70) and Average Variance Extracted (AVE ≥ 0.50 for convergent validity).
+
+```{r cfa-loadings}
+#standardized loadings
+std_ld <- standardizedSolution(fit_cfa) %>%
+  filter(op == "=~") %>%
+  transmute(Factor = lhs, Item = rhs,
+            Std_Loading = round(est.std, 3),
+            SE = round(se, 3), z = round(z, 2),
+            p  = ifelse(pvalue < .001, "< .001", as.character(round(pvalue,3))),
+            Item_R2 = round(est.std^2, 3))
+
+std_ld %>%
+  kbl(caption = "Standardised CFA loadings - Final model",
+      col.names = c("Factor","Item","Std. Loading","SE","z","p","Item R2")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) %>%
+  column_spec(3, bold = TRUE,
+              color = ifelse(std_ld$Std_Loading >= 0.70, "#27ae60", "#e67e22"))
+```
+
+```{r cfa-cr-ave}
+# AVE and CR 
+sl <- standardizedSolution(fit_cfa) %>%
+  filter(op == "=~") %>% select(Factor = lhs, lambda = est.std)
+
+cr_ave <- sl %>% group_by(Factor) %>%
+  summarise(N = n(),
+            CR  = round(sum(lambda)^2 / (sum(lambda)^2 + sum(1-lambda^2)), 3),
+            AVE = round(mean(lambda^2), 3), .groups="drop") %>%
+  mutate(CR_ok  = ifelse(CR  >= .70, "Yes", "No"),
+         AVE_ok = ifelse(AVE >= .50, "Yes", "No"))
+
+cr_ave %>%
+  kbl(caption = "Composite Reliability and AVE",
+      col.names = c("Factor","N Items","CR","AVE","CR >= .70","AVE >= .50")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  column_spec(3, bold=TRUE, color=ifelse(cr_ave$CR  >= .70, "#27ae60","#c0392b")) %>%
+  column_spec(4, bold=TRUE, color=ifelse(cr_ave$AVE >= .50, "#27ae60","#e67e22"))
+```
+
+## 2.4 Cronbach's Alpha
+
+Cronbach's alpha is computed for each factor using its final CFA items. Values of alpha ≥ 0.70 indicate acceptable internal consistency.
+
+```{r cronbach-alpha}
+library(psych)
+
+# Define final CFA item groups
+cfa_item_groups <- list(
+  Image_Decoration     = c("Im4", "Im3", "Im5"),
+  Image_Assortment     = c("Im1", "Im2", "Im15"),
+  Image_Atmosphere     = c("Im20", "Im22", "Im21"),
+  Image_Luxury         = c("Im12", "Im13"),
+  Image_FrenchIdentity = c("Im7", "Im6"),
+  Image_Trendy         = c("Im17", "Im18"),
+  Image_Gourmet        = c("Im10", "Im14")
+)
+
+cronbach_results <- lapply(names(cfa_item_groups), function(factor_name) {
+  items <- cfa_item_groups[[factor_name]]
+  alpha_val <- psych::alpha(data_raw[, items], na.rm = TRUE)$total$raw_alpha
+  data.frame(
+    Factor     = factor_name,
+    N_Items    = length(items),
+    Alpha      = round(alpha_val, 3),
+    Acceptable = ifelse(alpha_val >= 0.70, "Yes", "No"),
+    stringsAsFactors = FALSE
+  )
+}) %>% bind_rows()
+
+cronbach_results %>%
+  kbl(caption = "Cronbach's Alpha for each factor (final CFA items)",
+      col.names = c("Factor", "N Items", "Alpha", "Alpha >= .70")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  column_spec(3, bold = TRUE,
+              color = ifelse(cronbach_results$Alpha >= 0.70, "#27ae60", "#c0392b"))
+```
+
+
+All factors with three or more items show strong alpha values (≥ 0.70). The two-item factors (Trendy, FrenchIdentity, Gourmet) tend to have slightly lower alpha, which is expected since Cronbach's alpha is sensitive to the number of items. For these factors, the Composite Reliability values from previous section 2.3 provide more appropriate reliability estimates.
+
+
+## 2.5 Variance Explained per Factor
+
+The bar chart below shows the SS loadings for each image dimension, derived from the EFA solution that matches the final CFA structure (Im16, Im19, Im8, Im9 and Im11 removed). SS loadings reflect how strongly and broadly each factor is defined by its items. A higher value means the factor captures a larger share of common variance.
+
+```{r cfa-variance-plot, fig.height=5}
+# Re-run EFA on the exact item set used in the final CFA.
+image_data_cfa <- image_data %>% select(-Im16, -Im19, -Im8, -Im9, -Im11)
+efa_cfa_match <- fa.sort(fa(image_data_cfa, nfactors = 7, rotate = "oblimin",
+                             fm = "minres", use = "pairwise"))
+
+efa_vaccounted <- efa_cfa_match$Vaccounted
+actual_factor_names <- colnames(efa_vaccounted)
+
+# Map EFA factor codes to interpretable names based on loading inspection
+# (factors are ordered by SS loadings, so we assign names after running)
+factor_labels_map <- setNames(
+  c("Decoration", "Assortment", "Atmosphere", "Luxury",
+    "FrenchIdentity", "Trendy", "Gourmet"),
+  actual_factor_names[1:7]
+)
+
+variance_df <- data.frame(
+  Factor  = factor_labels_map[actual_factor_names],
+  SS_Load = round(efa_vaccounted["SS loadings", ], 3),
+  Var_Pct = round(efa_vaccounted["Proportion Var", ] * 100, 2),
+  Cum_Pct = round(cumsum(efa_vaccounted["Proportion Var", ]) * 100, 2)
+) %>% na.omit()
+
+variance_df %>%
+  kbl(caption = "SS Loadings and Variance Explained — Final 7-Factor EFA (Oblimin, matching CFA items)",
+      col.names = c("Factor", "SS Loadings", "Variance (%)", "Cumulative (%)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+dim_colours <- c("#4db6ac", "#ffd54f", "#ff8a65", "#90a4ae",
+                 "#ce93d8", "#90caf9", "#a5d6a7")
+
+ggplot(variance_df,
+       aes(x = reorder(Factor, -SS_Load), y = SS_Load, fill = Factor)) +
+  geom_col(width = 0.72, show.legend = FALSE) +
+  geom_text(aes(label = paste0(round(SS_Load, 2), "\n(", Var_Pct, "%)")),
+            vjust = -0.3, size = 3.2, fontface = "bold") +
+  scale_fill_manual(values = setNames(dim_colours, variance_df$Factor)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.20))) +
+  labs(title    = "SS Loadings by Image Dimension (Oblimin, 7 Factors, CFA item set)",
+       subtitle = "Numbers show SS loadings and % variance explained",
+       x = "Image Dimension", y = "SS Loadings") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        panel.grid.major.x = element_blank())
+```
+
+
+---
+
+# 3. Path Modelling - Full Mediation 
+
+## 3.1 Full Mediation Model
+
+Now that we have confirmed our latent factor structure, we will do path modeling in the next section. Here, the full causal model extends the measurement model with structural paths routing all seven image dimensions through two mediators (Satisfaction and Affective Commitment) to two outcome variables (Repurchase Intention and Co-Creation Intention). At first, we do not define the direct paths from image dimensions to outcomes are included. We here have at first only the full mediation specification.
+
+```{r sem-full}
+
+# define a  full mediation model  and fit it
+sem_model <- '
+  Image_Decoration     =~ Im4  + Im3  + Im5
+  Image_Assortment     =~ Im1  + Im2  + Im15
+  Image_Atmosphere     =~ Im22 + Im20 + Im21
+  Image_Luxury         =~ Im12 + Im13
+  Image_FrenchIdentity =~ Im7  + Im6
+  Image_Gourmet        =~ Im14 + Im10
+  Image_Trendy         =~ Im17 + Im18
+  Im1 ~~ Im2
+
+  Satisfaction        =~ SAT_1  + SAT_2  + SAT_3
+  AffectiveCommitment =~ COM_A1 + COM_A2 + COM_A3 + COM_A4
+  Repurchase          =~ C_REP1 + C_REP2 + C_REP3
+  CoCreation          =~ C_CR1  + C_CR3  + C_CR4
+
+  Satisfaction        ~ Image_Decoration + Image_Assortment + Image_Atmosphere +
+                        Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+  AffectiveCommitment ~ Image_Decoration + Image_Assortment + Image_Atmosphere +
+                        Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+  Repurchase  ~ Satisfaction + AffectiveCommitment
+  CoCreation  ~ Satisfaction + AffectiveCommitment
+'
+fit_sem <- cfa(sem_model, data = data_raw, estimator = "MLR", missing = "fiml")
+```
+
+## 3.2 Model Fit
+
+The full causal model is evaluated against the same fit thresholds as the CFA.
+
+```{r sem-fit}
+# get the fit measurements
+fm_sem <- fitMeasures(fit_sem,
+  c("chisq","df","pvalue","cfi","tli","rmsea","rmsea.ci.lower",
+    "rmsea.ci.upper","srmr","aic","bic"))
+
+data.frame(Index = names(fm_sem), Value = round(as.numeric(fm_sem), 3)) %>%
+  kbl(caption = "Full mediation SEM - fit indices", col.names = c("Index","Value")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE, position = "left")
+
+cat("Chi2/df =", round(fm_sem["chisq"] / fm_sem["df"], 3), "\n")
+```
+
+
+The model achieves CFI ≈ 0.97-0.98, RMSEA ≈ 0.04, SRMR ≈ 0.04 and Chi²/df ≈ 1.7, which is excellent fit across all values. 
+
+
+## 3.3 Structural Paths – Question 2
+
+The tables below present the standardised path coefficients from each image dimension to the two mediators, and from the mediators to the two outcomes. These results answer Question 2: are the mechanisms driving Satisfaction and Affective Commitment similar?
+
+For this, we need to understand the **beta** values, which are the standardised path coefficients. They express the expected change in the mediator/outcome (in standard deviation units) for a one standard deviation increase in the predictor, holding all other predictors constant. Because everything is on the same scale, betas from different predictors can be compared directly to assess relative importance. The **SE** is the standard error of that estimate, measuring uncertainty in the estimated path. A smaller SE relative to the Beta indicates a more precisely estimated relationship. The **z-value** is the ratio β / SE, and under the null hypothesis of no effect it follows an approximately standard normal distribution. Values beyond +-1.96 correspond to p < .05.
+
+A negative beta indicates that higher scores on the predictor are associated with *lower* scores on the mediator/outcome. In this context, if an image dimension had a negative beta on Satisfaction, it would mean that customers rating the store higher on that dimension actually report *lower* satisfaction on average.
+
+In the table below, you can see the betas from the latent factors to the mediators, and if they are significant or not.
+
+
+```{r sem-mediator-paths}
+# beta from latent factors -> mediators
+med_paths <- standardizedSolution(fit_sem) %>%
+  filter(op == "~", lhs %in% c("Satisfaction","AffectiveCommitment")) %>%
+  transmute(Mediator = lhs, Image = str_remove(rhs, "Image_"),
+            Beta = round(est.std, 3), SE = round(se, 3),
+            z = round(z, 2), p = round(pvalue, 3),
+            Sig = ifelse(pvalue < .05, "sig", "-")) %>%
+  arrange(Mediator, p)
+
+med_paths %>%
+  kbl(caption = "Standardised paths: Image dimensions -> Mediators") %>%
+  kable_styling(bootstrap_options = c("striped","hover")) %>%
+  column_spec(7, bold = TRUE,
+              color = ifelse(med_paths$Sig == "sig", "#27ae60", "#c0392b"))
+```
+
+From the table, we can read the following:
+
+**AffectiveCommitment** : Has four significative latent factors, which are Atmosphere, Assortment, Frenchidentity, and Luxury, in this order.
+**Satisfaction** : Two significative latent factors, which are Assortment and Gourmet, in thos order. 
+
+We can also have a look at the mediator-to-outcome paths with the full mediation model. The table shows that they are all significative and how strongly each mediator predicts each outcome. These are regression coefficients (betas), telling us the direction and magnitude of each path, with significance tests.
+
+```{r sem-outcome-paths}
+# mediator to outcome betas for full mediation
+out_paths <- standardizedSolution(fit_sem) %>%
+  filter(op == "~",
+         lhs %in% c("Repurchase","CoCreation"),
+         rhs %in% c("Satisfaction","AffectiveCommitment")) %>%
+  transmute(Outcome=lhs, Predictor=rhs,
+            Beta=round(est.std,3), SE=round(se,3),
+            z=round(z,2), p=round(pvalue,3),
+            Sig=ifelse(pvalue < .05, "sig", "-"))
+
+out_paths %>%
+  kbl(caption = "Standardised paths: Mediators -> Outcomes") %>%
+  kable_styling(bootstrap_options = c("striped","hover")) %>%
+  column_spec(7, bold=TRUE,
+              color=ifelse(out_paths$Sig=="sig","#27ae60","#c0392b"))
+```
+
+The table below gives the R², or Variance explained. This is how much of each construct's total variance is accounted for by the model overall.
+
+```{r sem-r2}
+#rsquare inspection
+r2 <- inspect(fit_sem, "r2")
+data.frame(Construct=names(r2), R2=round(as.numeric(r2),3)) %>%
+  filter(Construct %in% c("Satisfaction","AffectiveCommitment","Repurchase","CoCreation")) %>%
+  kbl(caption = "Variance explained (R2) for endogenous constructs") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+The barplot below summarizes the findings for the mediators. It reveals two distinct mediator profiles. Assortment is the only dimension that drives both mediators strongly: it dominates Satisfaction (beta approx equal to 0.63) and contributes meaningfully to Affective Commitment as well. Atmosphere and FrenchIdentity are primarily emotional drivers, predicting Affective Commitment but not Satisfaction. Gourmet does the opposite. It matters for Satisfaction but not for Commitment. Luxury is the only negative predictor, suppressing both mediators. Decoration and Trendy are non-significant in both cases.
+
+```{r sem-path-plot, fig.height=5.5}
+# barplot
+med_paths %>%
+  mutate(Alpha = ifelse(Sig == "sig", 1, 0.35)) %>%
+  ggplot(aes(x = reorder(Image, Beta), y = Beta, fill = Mediator, alpha = I(Alpha))) +
+  geom_col(position = position_dodge(0.8), width = 0.72) +
+  geom_hline(yintercept = 0, color = "grey40") +
+  coord_flip() +
+  scale_fill_manual(values = c("Satisfaction"="#2980b9","AffectiveCommitment"="#8e44ad"),
+                    name = NULL) +
+  labs(title    = "Image Dimensions -> Mediators: Standardised Beta",
+       subtitle = "Transparent = non-significant (p > .05)",
+       x = NULL, y = "Beta") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "top")
+```
+
+Finally, the diagram below shows the full mediation model.
+
+```{r sem-diagram, fig.height=10, fig.width=15, fig.cap="SEM Full Mediation"}
+# diagram showing the full model
+semPaths(fit_sem, what="std", whatLabels="std", layout="tree2", rotation=2,
+         style="lisrel", residuals=FALSE, intercepts=FALSE, exoCov=FALSE,
+         nCharNodes=5, sizeLat=11, sizeMan=5, edge.label.cex=0.6,
+         label.cex=0.8, curvePivot=FALSE, cardinal=FALSE, weighted=FALSE,
+         groups="latents", pastel=TRUE, mar=c(1,1,2,1),
+         main="Full Mediation SEM - Standardised Path Coefficients")
+```
+
+
+**Q2 – Are the mechanisms driving Satisfaction and Affective Commitment similar?**
+
+
+No, the pathways differ meaningfully:
+
+- **Drivers of Satisfaction:** Assortment is the dominant predictor. Gourmet adds a smaller positive contribution. These two image dimensions reflect **what** the store offers (range, food curation), and they predict the cognitive evaluation captured by Satisfaction.
+- **Drivers of Affective Commitment:** Atmosphere is the dominant predictor, French Identity also contributes positively. These are *how the store feels* dimensions, which build the emotional bond captured by Affective Commitment.
+- **Assortment is the most versatile dimension:** it predicts Satisfaction strongly and also contributes meaningfully to Affective Commitment.
+- **Luxury is a suppressor:** The standardised path from Luxury to both mediators is negative once the other six image dimensions are controlled for. Customers who score the store especially high on luxury imagery, beyond what their other perceptions would predict, report somewhat *lower* satisfaction and weaker emotional attachment. 
+- **Trendy and Decoration** do not significantly predict either mediator at conventional levels.
+
+**Mediation confirmed:** (Already for Q3) Both mediators significantly predict both outcomes. Co-Creation is more strongly driven by Affective Commitment, and Repurchase is more balanced between both mediators.
+
+
+## 3.4 Decomposition of Indirect Effects with the full mediated model
+
+The next mode is the same model as before, but re-specified with labels so we can better extract and report the indirect effects.
+
+```{r sem-delta-indirect}
+#fully mediated model
+sem_delta_model <- '
+  Image_Decoration     =~ Im4  + Im3  + Im5
+  Image_Assortment     =~ Im1  + Im2  + Im15
+  Image_Atmosphere     =~ Im22 + Im20 + Im21
+  Image_Luxury         =~ Im12 + Im13
+  Image_FrenchIdentity =~ Im7  + Im6
+  Image_Gourmet        =~ Im14 + Im10
+  Image_Trendy         =~ Im17 + Im18
+  Im1 ~~ Im2
+
+  Satisfaction        =~ SAT_1  + SAT_2  + SAT_3
+  AffectiveCommitment =~ COM_A1 + COM_A2 + COM_A3 + COM_A4
+  Repurchase          =~ C_REP1 + C_REP2 + C_REP3
+  CoCreation          =~ C_CR1  + C_CR3  + C_CR4
+
+  # Labeled structural paths
+  Satisfaction        ~ a1*Image_Atmosphere + a2*Image_Luxury + a3*Image_Assortment +
+                        a4*Image_Decoration + a5*Image_FrenchIdentity +
+                        a6*Image_Gourmet    + a7*Image_Trendy
+  AffectiveCommitment ~ c1*Image_Atmosphere + c2*Image_Luxury + c3*Image_Assortment +
+                        c4*Image_Decoration + c5*Image_FrenchIdentity +
+                        c6*Image_Gourmet    + c7*Image_Trendy
+  Repurchase  ~ b1*Satisfaction + b2*AffectiveCommitment
+  CoCreation  ~ d1*Satisfaction + d2*AffectiveCommitment
+
+  # Indirect effects (total via both mediators)
+  ind_Atm_Rep := (a1*b1) + (c1*b2)
+  ind_Lux_Rep := (a2*b1) + (c2*b2)
+  ind_Ass_Rep := (a3*b1) + (c3*b2)
+  ind_Dec_Rep := (a4*b1) + (c4*b2)
+  ind_Fre_Rep := (a5*b1) + (c5*b2)
+  ind_Gou_Rep := (a6*b1) + (c6*b2)
+  ind_Tre_Rep := (a7*b1) + (c7*b2)
+
+  ind_Atm_CC  := (a1*d1) + (c1*d2)
+  ind_Lux_CC  := (a2*d1) + (c2*d2)
+  ind_Ass_CC  := (a3*d1) + (c3*d2)
+  ind_Dec_CC  := (a4*d1) + (c4*d2)
+  ind_Fre_CC  := (a5*d1) + (c5*d2)
+  ind_Gou_CC  := (a6*d1) + (c6*d2)
+  ind_Tre_CC  := (a7*d1) + (c7*d2)
+
+  # Pathway decomposition: via Satisfaction only
+  via_sat_Atm_Rep := a1*b1;  via_sat_Atm_CC := a1*d1
+  via_sat_Lux_Rep := a2*b1;  via_sat_Lux_CC := a2*d1
+  via_sat_Ass_Rep := a3*b1;  via_sat_Ass_CC := a3*d1
+  via_sat_Dec_Rep := a4*b1;  via_sat_Dec_CC := a4*d1
+  via_sat_Fre_Rep := a5*b1;  via_sat_Fre_CC := a5*d1
+  via_sat_Gou_Rep := a6*b1;  via_sat_Gou_CC := a6*d1
+  via_sat_Tre_Rep := a7*b1;  via_sat_Tre_CC := a7*d1
+
+  # Pathway decomposition: via AffectiveCommitment only
+  via_com_Atm_Rep := c1*b2;  via_com_Atm_CC := c1*d2
+  via_com_Lux_Rep := c2*b2;  via_com_Lux_CC := c2*d2
+  via_com_Ass_Rep := c3*b2;  via_com_Ass_CC := c3*d2
+  via_com_Dec_Rep := c4*b2;  via_com_Dec_CC := c4*d2
+  via_com_Fre_Rep := c5*b2;  via_com_Fre_CC := c5*d2
+  via_com_Gou_Rep := c6*b2;  via_com_Gou_CC := c6*d2
+  via_com_Tre_Rep := c7*b2;  via_com_Tre_CC := c7*d2
+'
+
+fit_delta <- cfa(sem_delta_model, data = data_raw,
+                 estimator = "MLR", missing = "fiml")
+
+# Extract all := results
+delta_params <- parameterEstimates(fit_delta, standardized = TRUE) %>%
+  filter(op == ":=")
+
+delta_indirect <- delta_params %>%
+  filter(grepl("^ind_", label)) %>%
+  transmute(
+    Effect   = label,
+    Std_Est  = round(std.all, 3),
+    SE       = round(se, 3),
+    CI_Lower = round(ci.lower, 3),
+    CI_Upper = round(ci.upper, 3),
+    p        = round(pvalue, 3),
+    Sig      = ifelse(pvalue < .05, "YES", "no")
+  ) %>%
+  arrange(desc(abs(Std_Est)))
+
+delta_indirect %>%
+  kbl(caption = "Indirect effects with 95% CIs (N = 553, FIML)",
+      col.names = c("Indirect Effect","Std. Est.","SE","95% CI Low","95% CI High","p","Sig?")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  column_spec(7, bold = TRUE,
+              color = ifelse(delta_indirect$Sig == "YES", "#27ae60", "#c0392b"))
+```
+
+The table above gives indirect effects only: how much each image dimension influences the outcomes through the two mediators combined, and their significance. The plot below is a summary of the results.
+
+```{r delta-indirect-plot, fig.height=6}
+delta_indirect %>%
+  mutate(
+    Outcome   = ifelse(grepl("Rep$", Effect), "Repurchase", "CoCreation"),
+    Dimension = Effect %>%
+                  str_remove("^ind_") %>%
+                  str_remove("_Rep$|_CC$") %>%
+                  recode("Atm"="Atmosphere","Lux"="Luxury","Ass"="Assortment",
+                         "Dec"="Decoration","Fre"="FrenchIdentity",
+                         "Gou"="Gourmet","Tre"="Trendy"),
+    Sig = factor(Sig, levels = c("YES","no"))
+  ) %>%
+  ggplot(aes(x = reorder(Dimension, Std_Est), y = Std_Est, fill = Sig)) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = 0, color = "grey40") +
+  coord_flip() +
+  facet_wrap(~Outcome) +
+  scale_fill_manual(values = c("YES" = "#27ae60", "no" = "#bdc3c7"),
+                    labels = c("YES" = "Significant (p < .05)",
+                               "no"  = "Non-significant"),
+                    name = NULL) +
+  labs(title    = "Indirect Effects — Standardised Estimates",
+       subtitle = "N = 553 (FIML)  |  Green = significant (p < .05)",
+       x = NULL, y = "Standardised Indirect Effect") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"),
+        strip.text = element_text(face = "bold"),
+        legend.position = "top")
+```
+
+If the 95% CI does not contain zero (Sig = YES), the indirect effect is statistically significant and mediation is confirmed for that path.
+
+What we see from the plot:
+
+- For Repurchase, three dimensions transmit significant indirect effects: Assortment is by far the strongest (beta = 0.328), followed by Atmosphere (0.149) and FrenchIdentity (0.095). Luxury has a significant negative indirect effect (−0.123), meaning it actually suppresses repurchase intention through the mediators.
+
+- For CoCreation, the picture is much weaker. Only Atmosphere (0.146) and FrenchIdentity (0.046) reach
+significance. Assortment, despite being the dominant driver of Repurchase, has a near-zero and non-significant indirect effect on CoCreation (−0.011). This makes sense given what we saw earlier: Assortment drives Satisfaction strongly, but Satisfaction has a negative path to CoCreation, which cancels out its positive contribution via Affective Commitment.
+
+In the plot below, you can see the exact decomposition between both mediators.
+```{r decomposition-plot, fig.height=5}
+
+decode_image <- function(x) {
+  x %>%
+    str_remove("^(ind|via_sat|via_com)_") %>%
+    str_remove("_Rep$|_CC$") %>%
+    recode("Atm"="Atmosphere","Lux"="Luxury","Ass"="Assortment",
+           "Dec"="Decoration","Fre"="FrenchIdentity","Gou"="Gourmet","Tre"="Trendy")
+}
+
+via_sat_tbl <- delta_params %>%
+  filter(grepl("^via_sat_", label)) %>%
+  transmute(
+    Outcome          = ifelse(grepl("_Rep$", label), "Repurchase", "CoCreation"),
+    Image            = decode_image(label),
+    Via_Satisfaction = round(std.all, 3)
+  )
+
+via_com_tbl <- delta_params %>%
+  filter(grepl("^via_com_", label)) %>%
+  transmute(
+    Outcome        = ifelse(grepl("_Rep$", label), "Repurchase", "CoCreation"),
+    Image          = decode_image(label),
+    Via_Commitment = round(std.all, 3)
+  )
+
+ind_tbl <- delta_params %>%
+  filter(grepl("^ind_", label)) %>%
+  transmute(
+    Outcome      = ifelse(grepl("_Rep$", label), "Repurchase", "CoCreation"),
+    Image        = decode_image(label),
+    Indirect_std = round(std.all, 3)
+  )
+
+pathway_tbl <- ind_tbl %>%
+  left_join(via_sat_tbl, by = c("Outcome", "Image")) %>%
+  left_join(via_com_tbl, by = c("Outcome", "Image")) %>%
+  arrange(Outcome, desc(abs(Indirect_std)))
+
+pathway_tbl %>%
+  pivot_longer(c(Via_Satisfaction, Via_Commitment),
+               names_to = "Pathway", values_to = "Effect") %>%
+  mutate(Pathway = recode(Pathway,
+           "Via_Satisfaction" = "via Satisfaction",
+           "Via_Commitment"   = "via Commitment")) %>%
+  ggplot(aes(x = reorder(Image, Effect), y = Effect, fill = Pathway)) +
+  geom_col(position = position_stack(), width = 0.75) +
+  coord_flip() +
+  facet_wrap(~Outcome) +
+  scale_fill_manual(values = c("via Satisfaction"="#3498db","via Commitment"="#9b59b6"),
+                    name = NULL) +
+  labs(title    = "Pathway Decomposition: via Satisfaction vs. via Commitment",
+       subtitle = "Stacked = indirect effect  |  Colour = mediating channel",
+       x = NULL, y = "Standardised Indirect Effect") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12),
+        legend.position = "bottom")
+```
+
+
+---
+
+# 4. Partially mediated model and Total Effects – Question 3
+
+Here, the next model (`fit_full`) contains all labeled paths, e.g. indirect, direct and total.
+
+```{r boot-total-setup}
+# Helper vectors used throughout section 4
+images    <- c("Image_Decoration","Image_Assortment","Image_Atmosphere",
+               "Image_Luxury","Image_FrenchIdentity","Image_Gourmet","Image_Trendy")
+mediators <- c("Satisfaction","AffectiveCommitment")
+outcomes  <- c("Repurchase","CoCreation")
+```
+
+
+
+## 4.1 Direct Paths only
+We fit the model below.
+
+```{r boot-full-model}
+#partially mediated model
+sem_full_model <- '
+  Image_Decoration     =~ Im4  + Im3  + Im5
+  Image_Assortment     =~ Im1  + Im2  + Im15
+  Image_Atmosphere     =~ Im22 + Im20 + Im21
+  Image_Luxury         =~ Im12 + Im13
+  Image_FrenchIdentity =~ Im7  + Im6
+  Image_Gourmet        =~ Im14 + Im10
+  Image_Trendy         =~ Im17 + Im18
+  Im1 ~~ Im2
+
+  Satisfaction        =~ SAT_1  + SAT_2  + SAT_3
+  AffectiveCommitment =~ COM_A1 + COM_A2 + COM_A3 + COM_A4
+  Repurchase          =~ C_REP1 + C_REP2 + C_REP3
+  CoCreation          =~ C_CR1  + C_CR3  + C_CR4
+
+  # Labeled mediation paths
+  Satisfaction        ~ a1*Image_Atmosphere + a2*Image_Luxury + a3*Image_Assortment +
+                        a4*Image_Decoration + a5*Image_FrenchIdentity +
+                        a6*Image_Gourmet    + a7*Image_Trendy
+  AffectiveCommitment ~ c1*Image_Atmosphere + c2*Image_Luxury + c3*Image_Assortment +
+                        c4*Image_Decoration + c5*Image_FrenchIdentity +
+                        c6*Image_Gourmet    + c7*Image_Trendy
+  Repurchase ~ b1*Satisfaction + b2*AffectiveCommitment
+  CoCreation ~ d1*Satisfaction + d2*AffectiveCommitment
+
+  # Labeled direct paths
+  Repurchase ~ e1*Image_Atmosphere + e2*Image_Luxury + e3*Image_Assortment +
+               e4*Image_Decoration + e5*Image_FrenchIdentity +
+               e6*Image_Gourmet    + e7*Image_Trendy
+  CoCreation ~ f1*Image_Atmosphere + f2*Image_Luxury + f3*Image_Assortment +
+               f4*Image_Decoration + f5*Image_FrenchIdentity +
+               f6*Image_Gourmet    + f7*Image_Trendy
+
+  # Indirect effects
+  ind_Atm_Rep := (a1*b1) + (c1*b2);  ind_Atm_CC := (a1*d1) + (c1*d2)
+  ind_Lux_Rep := (a2*b1) + (c2*b2);  ind_Lux_CC := (a2*d1) + (c2*d2)
+  ind_Ass_Rep := (a3*b1) + (c3*b2);  ind_Ass_CC := (a3*d1) + (c3*d2)
+  ind_Dec_Rep := (a4*b1) + (c4*b2);  ind_Dec_CC := (a4*d1) + (c4*d2)
+  ind_Fre_Rep := (a5*b1) + (c5*b2);  ind_Fre_CC := (a5*d1) + (c5*d2)
+  ind_Gou_Rep := (a6*b1) + (c6*b2);  ind_Gou_CC := (a6*d1) + (c6*d2)
+  ind_Tre_Rep := (a7*b1) + (c7*b2);  ind_Tre_CC := (a7*d1) + (c7*d2)
+
+  # Direct effects
+  dir_Atm_Rep := e1;  dir_Atm_CC := f1
+  dir_Lux_Rep := e2;  dir_Lux_CC := f2
+  dir_Ass_Rep := e3;  dir_Ass_CC := f3
+  dir_Dec_Rep := e4;  dir_Dec_CC := f4
+  dir_Fre_Rep := e5;  dir_Fre_CC := f5
+  dir_Gou_Rep := e6;  dir_Gou_CC := f6
+  dir_Tre_Rep := e7;  dir_Tre_CC := f7
+
+  # Total effects = indirect + direct (exactly as in class: t := c + a*b)
+  tot_Atm_Rep := (a1*b1) + (c1*b2) + e1;  tot_Atm_CC := (a1*d1) + (c1*d2) + f1
+  tot_Lux_Rep := (a2*b1) + (c2*b2) + e2;  tot_Lux_CC := (a2*d1) + (c2*d2) + f2
+  tot_Ass_Rep := (a3*b1) + (c3*b2) + e3;  tot_Ass_CC := (a3*d1) + (c3*d2) + f3
+  tot_Dec_Rep := (a4*b1) + (c4*b2) + e4;  tot_Dec_CC := (a4*d1) + (c4*d2) + f4
+  tot_Fre_Rep := (a5*b1) + (c5*b2) + e5;  tot_Fre_CC := (a5*d1) + (c5*d2) + f5
+  tot_Gou_Rep := (a6*b1) + (c6*b2) + e6;  tot_Gou_CC := (a6*d1) + (c6*d2) + f6
+  tot_Tre_Rep := (a7*b1) + (c7*b2) + e7;  tot_Tre_CC := (a7*d1) + (c7*d2) + f7
+'
+
+fit_boot_full <- cfa(sem_full_model, data = data_raw,
+                     estimator = "MLR", missing = "fiml")
+
+# Extract all results
+full_params <- parameterEstimates(fit_boot_full, standardized = TRUE)
+
+# Fit comparison
+fit_full_compare <- data.frame(
+  Model   = c("Full Mediation (fit_sem)", "Partial Mediation (fit_boot_full)"),
+  Chi2_df = round(c(fitMeasures(fit_sem,       "chisq")/fitMeasures(fit_sem,       "df"),
+                    fitMeasures(fit_boot_full, "chisq")/fitMeasures(fit_boot_full, "df")), 3),
+  CFI     = round(c(fitMeasures(fit_sem,       "cfi"),   fitMeasures(fit_boot_full, "cfi")),   3),
+  RMSEA   = round(c(fitMeasures(fit_sem,       "rmsea"), fitMeasures(fit_boot_full, "rmsea")), 3),
+  SRMR    = round(c(fitMeasures(fit_sem,       "srmr"),  fitMeasures(fit_boot_full, "srmr")),  3),
+  AIC     = round(c(fitMeasures(fit_sem,       "aic"),   fitMeasures(fit_boot_full, "aic")),   1)
+)
+
+fit_full_compare %>%
+  kbl(caption = "Full vs Partial Mediation — Fit Comparison") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(1, bold = TRUE, background = "#d5f5e3")
+```
+
+In the table above, we compare the full vs partial mediation. The fit comparison seems to show that the full mediation model is preferable. Both models achieve excellent fit by all indices (CFI = 0.977, RMSEA ≈ 0.035–0.036, SRMR ≈ 0.039–0.041) However, the full mediation model has a lower AIC (42159.5 vs 42169.8), indicating that it achieves a better balance between fit and parsimony. Still, below we continue to analyze the partialy mediated model. 
+
+First, we only have a look at the direct paths. They are described in the table below. Their significance can be seen in the next table.
+
+```{r direct-paths-table}
+# direct paths
+direct_paths <- full_params %>%
+  filter(op == ":=", grepl("^dir_", label)) %>%
+  transmute(
+    Outcome  = ifelse(grepl("_Rep$", label), "Repurchase", "CoCreation"),
+    Image    = label %>%
+                 str_remove("^dir_") %>%
+                 str_remove("_Rep$|_CC$") %>%
+                 recode("Atm"="Atmosphere","Lux"="Luxury","Ass"="Assortment",
+                        "Dec"="Decoration","Fre"="FrenchIdentity",
+                        "Gou"="Gourmet","Tre"="Trendy"),
+    Beta_std = round(std.all, 3),
+    Beta_est = round(est, 3),
+    SE       = round(se, 3),
+    CI_Lower = round(ci.lower, 3),
+    CI_Upper = round(ci.upper, 3),
+    p        = round(pvalue, 3),
+    Sig      = ifelse(pvalue < .05, "YES", "no")
+  ) %>%
+  arrange(Outcome, desc(abs(Beta_std)))
+
+# Table 1: Standardised estimates — ranking
+direct_paths %>%
+  select(Outcome, Image, Beta_std) %>%
+  kbl(caption = "Direct Paths — Standardised estimates (ranking)",
+      col.names = c("Outcome","Image Dimension","Std. Beta")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  column_spec(3, bold = TRUE)
+
+# Table 2: Unstandardised estimates with CIs — significance
+direct_paths %>%
+  select(Outcome, Image, Beta_est, SE, CI_Lower, CI_Upper, p, Sig) %>%
+  kbl(caption = "Direct Paths — Unstandardised estimates with 95% CIs (significance)",
+      col.names = c("Outcome","Image Dimension","Est.","SE","CI Low","CI High","p","Sig")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  column_spec(8, bold = TRUE,
+              color = ifelse(direct_paths$Sig == "YES", "#27ae60", "#c0392b"))
+```
+
+
+All direct effects are small in magnitude, and none stands out as a dominant predictor. 
+
+```{r direct-paths-plot, fig.height=5}
+# Standardised effects only 
+direct_paths %>%
+  mutate(Alpha = ifelse(Sig == "YES", 1, 0.35)) %>%
+  ggplot(aes(x = reorder(Image, Beta_std), y = Beta_std,
+             fill = Outcome, alpha = I(Alpha))) +
+  geom_col(position = position_dodge(0.8), width = 0.72) +
+  geom_hline(yintercept = 0, color = "grey40") +
+  coord_flip() +
+  scale_fill_manual(values = c("Repurchase"="#2980b9","CoCreation"="#27ae60"), name = NULL) +
+  labs(title    = "Direct Paths: Image Dimensions → Outcomes",
+       subtitle = "Standardised effects  |  Transparent = non-significant (p > .05)",
+       x = NULL, y = "Standardised Beta") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "top")
+```
+
+Non-significant direct paths confirm that the effects of brand image seem to be mostly mediated through Satisfaction and Affective Commitment.
+
+## 4.2 Total Effects = Indirect + Direct
+Now we have a look at Total effect = indirect paths + direct paths.
+
+```{r total-effects-full}
+total_full <- full_params %>%
+  filter(op == ":=", grepl("^tot_", label)) %>%
+  transmute(
+    Outcome   = ifelse(grepl("_Rep$", label), "Repurchase", "CoCreation"),
+    Image     = label %>%
+                  str_remove("^tot_") %>%
+                  str_remove("_Rep$|_CC$") %>%
+                  recode("Atm"="Atmosphere","Lux"="Luxury","Ass"="Assortment",
+                         "Dec"="Decoration","Fre"="FrenchIdentity",
+                         "Gou"="Gourmet","Tre"="Trendy"),
+    Total_std = round(std.all, 3),
+    Total_est = round(est, 3),
+    SE        = round(se, 3),
+    CI_Lower  = round(ci.lower, 3),
+    CI_Upper  = round(ci.upper, 3),
+    p         = round(pvalue, 3),
+    Sig       = ifelse(pvalue < .05, "YES", "no")
+  ) %>%
+  left_join(
+    full_params %>%
+      filter(op == ":=", grepl("^ind_", label)) %>%
+      transmute(
+        Outcome      = ifelse(grepl("_Rep$", label), "Repurchase", "CoCreation"),
+        Image        = label %>%
+                         str_remove("^ind_") %>%
+                         str_remove("_Rep$|_CC$") %>%
+                         recode("Atm"="Atmosphere","Lux"="Luxury","Ass"="Assortment",
+                                "Dec"="Decoration","Fre"="FrenchIdentity",
+                                "Gou"="Gourmet","Tre"="Trendy"),
+        Indirect_std = round(std.all, 3)
+      ),
+    by = c("Outcome","Image")
+  ) %>%
+  left_join(direct_paths %>% select(Outcome, Image, Direct_std = Beta_std),
+            by = c("Outcome","Image")) %>%
+  arrange(Outcome, desc(abs(Total_std)))
+
+# Table 1: Standardised estimates — ranking
+total_full %>%
+  select(Outcome, Image, Indirect_std, Direct_std, Total_std) %>%
+  kbl(caption = "Total Effects = Indirect + Direct — Standardised estimates (ranking)",
+      col.names = c("Outcome","Image","Indirect (std)","Direct (std)","Total (std)")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) %>%
+  column_spec(5, bold = TRUE)
+
+# Table 2: Unstandardised estimates with CIs — significance
+total_full %>%
+  select(Outcome, Image, Total_est, SE, CI_Lower, CI_Upper, p, Sig) %>%
+  kbl(caption = "Total Effects — Unstandardised estimates with 95% CIs (significance)",
+      col.names = c("Outcome","Image","Est.","SE","CI Low","CI High","p","Sig")) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) %>%
+  column_spec(8, bold = TRUE,
+              color = ifelse(total_full$Sig == "YES", "#27ae60", "#c0392b"))
+```
+
+From the tables above we can see that: The total effect (indirect + direct) reveals that for Repurchase, Atmosphere (0.234) and Assortment (0.205) are the strongest positive drivers overall, while Luxury nearly cancels out (−0.001) as its positive direct and negative indirect effects offset each other. For CoCreation, Atmosphere is again the dominant dimension (0.265), while most other dimensions have near-zero or slightly negative total effects, reflecting the competing directions of their indirect and direct components.
+
+For the significance, only two total effects reach statistical significance: Atmosphere on both CoCreation (p < .001) and Repurchase (p = .001).
+
+```{r total-effects-full-plot, fig.height=5}
+# Standardised effects only — no CI bars
+total_full %>%
+  pivot_longer(c(Indirect_std, Direct_std), names_to = "Type", values_to = "Effect") %>%
+  mutate(Type = recode(Type, "Indirect_std" = "Indirect", "Direct_std" = "Direct")) %>%
+  ggplot(aes(x = reorder(Image, abs(Total_std)), y = Effect, fill = Type)) +
+  geom_col(position = position_stack(), width = 0.75) +
+  coord_flip() +
+  facet_wrap(~Outcome) +
+  scale_fill_manual(values = c("Indirect"="#3498db","Direct"="#e74c3c"), name = NULL) +
+  labs(title    = "Total Effects = Indirect + Direct",
+       subtitle = "Standardised effects  |  Blue = indirect, Red = direct",
+       x = NULL, y = "Standardised Effect") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        strip.text = element_text(face = "bold", size = 12),
+        legend.position = "bottom")
+```
+
+The stacked bars decompose each dimension's total effect into its indirect (blue) and direct (red) components, making the suppression patterns immediately visible.
+
+Below, a diagram describes the partially mediated model that we have.
+
+```{r sem-partial-diagram, fig.height=10, fig.width=15, fig.cap="Full Causal Model with Direct + Indirect Paths"}
+semPaths(fit_boot_full, what="std", whatLabels="std", layout="tree2", rotation=2,
+         style="lisrel", residuals=FALSE, intercepts=FALSE, exoCov=FALSE,
+         nCharNodes=5, sizeLat=11, sizeMan=5, edge.label.cex=0.55,
+         label.cex=0.8, curvePivot=FALSE, cardinal=FALSE, weighted=FALSE,
+         groups="latents", pastel=TRUE, mar=c(1,1,2,1),
+         main="Full Causal Model - Standardised Path Coefficients (Indirect + Direct)")
+```
+
+```{r q3-ranking-auto}
+q3_ranking <- total_full %>%
+  group_by(Outcome) %>%
+  arrange(desc(Total_std), .by_group = TRUE) %>%
+  summarise(Ranking = paste(Image, sprintf("(%.3f)", Total_std), collapse = " > "),
+            .groups = "drop")
+
+q3_ranking %>%
+  kbl(caption = "Q3: Ranking of image dimensions by standardised total effect",
+      col.names = c("Outcome","Ranking (highest -> lowest total effect)")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+The ranking above is generated directly from the total effects. Dimensions flagged as significant (p < .05) represent the most defensible drivers for managerial action.
+
+
+---
+
+# 5. Robustness Check: Model Generalisation
+
+```{r sec5-setup, include=FALSE}
+# fit_extended is fitted here (hidden) — only used in section 5.5 for a fit
+# comparison. fit_robust is defined visibly in section 5.1 where it is first used.
+# of standalone predictors below since it is now a removed item).
+sem_extended <- '
+  Image_Decoration     =~ Im4  + Im3  + Im5
+  Image_Assortment     =~ Im1  + Im2  + Im15
+  Image_Atmosphere     =~ Im22 + Im20 + Im21
+  Image_Luxury         =~ Im12 + Im13
+  Image_FrenchIdentity =~ Im7  + Im6
+  Image_Gourmet        =~ Im14 + Im10
+  Image_Trendy         =~ Im17 + Im18
+  Im1 ~~ Im2
+  Satisfaction        =~ SAT_1  + SAT_2  + SAT_3
+  AffectiveCommitment =~ COM_A1 + COM_A2 + COM_A3 + COM_A4
+  Repurchase          =~ C_REP1 + C_REP2 + C_REP3
+  CoCreation          =~ C_CR1  + C_CR3  + C_CR4
+  Satisfaction        ~ Image_Decoration + Image_Assortment + Image_Atmosphere +
+                        Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+  AffectiveCommitment ~ Image_Decoration + Image_Assortment + Image_Atmosphere +
+                        Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+  Satisfaction        ~ Im19
+  AffectiveCommitment ~ Im19
+  Repurchase          ~ Im19
+  CoCreation          ~ Im19
+  Repurchase  ~ Satisfaction + AffectiveCommitment +
+                Image_Decoration + Image_Assortment + Image_Atmosphere +
+                Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+  CoCreation  ~ Satisfaction + AffectiveCommitment +
+                Image_Decoration + Image_Assortment + Image_Atmosphere +
+                Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+'
+fit_extended <- cfa(sem_extended, data = data_raw, estimator = "MLR", missing = "fiml")
+```
+
+
+## 5.1 Robustness — Fit Comparison
+
+The robustness SEM adds all items removed during EFA/CFA (Im8, Im9, Im11, Im16 and Im19) as standalone observed predictors directly onto the mediators and outcomes, without assigning them to any latent factor. This tests whether any of these excluded items carries unique predictive information beyond the seven-factor structure. For this, we use the full mediation model.
+
+
+```{r robustness-model}
+# robustness check
+sem_robust <- '
+  Image_Decoration     =~ Im4  + Im3  + Im5
+  Image_Assortment     =~ Im1  + Im2  + Im15
+  Image_Atmosphere     =~ Im20 + Im22 + Im21
+  Image_Luxury         =~ Im12 + Im13
+  Image_FrenchIdentity =~ Im7  + Im6
+  Image_Gourmet        =~ Im14 + Im10
+  Image_Trendy         =~ Im17 + Im18
+  Im1 ~~ Im2
+
+  Satisfaction        =~ SAT_1  + SAT_2  + SAT_3
+  AffectiveCommitment =~ COM_A1 + COM_A2 + COM_A3 + COM_A4
+  Repurchase          =~ C_REP1 + C_REP2 + C_REP3
+  CoCreation          =~ C_CR1  + C_CR3  + C_CR4
+
+  Satisfaction        ~ Image_Decoration + Image_Assortment + Image_Atmosphere +
+                        Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+  AffectiveCommitment ~ Image_Decoration + Image_Assortment + Image_Atmosphere +
+                        Image_Luxury + Image_FrenchIdentity + Image_Gourmet + Image_Trendy
+  Repurchase          ~ Satisfaction + AffectiveCommitment
+  CoCreation          ~ Satisfaction + AffectiveCommitment
+
+  # Removed items as standalone predictors, not assigned to any factor
+  Satisfaction        ~ Im8 + Im9 + Im11 + Im16 + Im19
+  AffectiveCommitment ~ Im8 + Im9 + Im11 + Im16 + Im19
+  Repurchase          ~ Im8 + Im9 + Im11 + Im16 + Im19
+  CoCreation          ~ Im8 + Im9 + Im11 + Im16 + Im19
+'
+fit_robust <- cfa(sem_robust, data = data_raw, estimator = "MLR", missing = "fiml")
+```
+
+```{r robustness-fit}
+#compare fit measurements 
+fit_robust_compare <- data.frame(
+  Model   = c("Final SEM (clean items)",
+              "Robustness SEM (+Im8/Im9/Im11/Im16/Im19 as predictors)"),
+  Chi2_df = round(c(fitMeasures(fit_sem,    "chisq")/fitMeasures(fit_sem,    "df"),
+                    fitMeasures(fit_robust, "chisq")/fitMeasures(fit_robust, "df")), 3),
+  CFI     = round(c(fitMeasures(fit_sem,    "cfi"),   fitMeasures(fit_robust, "cfi")),   3),
+  TLI     = round(c(fitMeasures(fit_sem,    "tli"),   fitMeasures(fit_robust, "tli")),   3),
+  RMSEA   = round(c(fitMeasures(fit_sem,    "rmsea"), fitMeasures(fit_robust, "rmsea")), 3),
+  SRMR    = round(c(fitMeasures(fit_sem,    "srmr"),  fitMeasures(fit_robust, "srmr")),  3)
+)
+
+fit_robust_compare %>%
+  kbl(caption = "Robustness Check: Final SEM vs SEM with Removed Items as Predictors") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(1, bold = TRUE, background = "#d5f5e3")
+```
+
+## 5.2 Robustness — Effect of Removed Items on Mediators (Im8, Im9, Im11, Im16, Im19)
+
+```{r robustness-mediator-paths}
+removed_items <- c("Im8", "Im9", "Im11", "Im16", "Im19")
+
+rob_med <- standardizedSolution(fit_robust) %>%
+  filter(op == "~",
+         lhs %in% c("Satisfaction", "AffectiveCommitment"),
+         rhs %in% removed_items) %>%
+  transmute(Outcome  = lhs,
+            Item     = rhs,
+            Beta     = round(est.std, 3),
+            SE       = round(se, 3),
+            z        = round(z, 2),
+            p        = round(pvalue, 3),
+            Sig      = ifelse(pvalue < .05, "Yes", "No"))
+
+rob_med %>%
+  kbl(caption = "Removed Items as Individual Predictors of Mediators",
+      col.names = c("Mediator","Item","Beta","SE","z","p","Significant")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  column_spec(7, bold = TRUE,
+              color = ifelse(rob_med$Sig == "Yes", "#c0392b", "#27ae60"))
+```
+
+## 5.3 Robustness — Effect of Removed Items on Outcomes (Im8, Im9, Im11, Im16, Im19)
+
+```{r robustness-outcome-paths}
+rob_out <- standardizedSolution(fit_robust) %>%
+  filter(op == "~",
+         lhs %in% c("Repurchase", "CoCreation"),
+         rhs %in% removed_items) %>%
+  transmute(Outcome  = lhs,
+            Item     = rhs,
+            Beta     = round(est.std, 3),
+            SE       = round(se, 3),
+            z        = round(z, 2),
+            p        = round(pvalue, 3),
+            Sig      = ifelse(pvalue < .05, "Yes", "No"))
+
+rob_out %>%
+  kbl(caption = "Removed Items as Individual Predictors of Outcomes",
+      col.names = c("Outcome","Item","Beta","SE","z","p","Significant")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  column_spec(7, bold = TRUE,
+              color = ifelse(rob_out$Sig == "Yes", "#c0392b", "#27ae60"))
+```
+
+```{r robustness-items-plot, fig.height=5}
+bind_rows(rob_med, rob_out) %>%
+  mutate(Alpha = ifelse(Sig == "Yes", 1, 0.35),
+         Target = Outcome) %>%
+  ggplot(aes(x = Item, y = Beta, fill = Target, alpha = I(Alpha))) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_hline(yintercept = 0, color = "grey40") +
+  facet_wrap(~Target, scales = "free_y") +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  labs(title    = "Robustness: Direct Effects of Removed Items",
+       subtitle = "Transparent = non-significant (p > .05) | Significant = potential bias",
+       x = "Removed Item", y = "Standardised Beta") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"),
+        strip.text = element_text(face = "bold"))
+```
+
+The chart shows the direct effects of the five removed items (Im11, Im16, Im19, Im8, Im9) on each of the four endogenous constructs, with transparent bars indicating non-significance.
+
+Im19 stands out as the most problematic item. It has a large, significant direct effect on Satisfaction (beta ≈ 0.22), suggesting it carries unique predictive information not captured by the seven-factor structure. 
+
+Im11 is the second most noteworthy item, showing significant direct effects on Repurchase (beta ≈ 0.10), but compared to Im19, its p-value is larger (0.039). 
+
+
+## 5.4 Sensitivity to Removed Items : Im19
+
+The robustness analysis found that Im19 ("Professional Organisation") has a significant direct effect on Satisfaction when added as a standalone predictor. Before incorporating it into the final model, we test whether doing so actually improves model fit.
+
+```{r sem-extended-fit}
+fit_ext_compare <- data.frame(
+  Model   = c("Final SEM (7 factors only)",
+              "Extended SEM (+Im19, +direct paths)"),
+  Chi2_df = round(c(fitMeasures(fit_sem,      "chisq")/fitMeasures(fit_sem,      "df"),
+                    fitMeasures(fit_extended, "chisq")/fitMeasures(fit_extended, "df")), 3),
+  CFI     = round(c(fitMeasures(fit_sem,      "cfi"),   fitMeasures(fit_extended, "cfi")),   3),
+  RMSEA   = round(c(fitMeasures(fit_sem,      "rmsea"), fitMeasures(fit_extended, "rmsea")), 3),
+  SRMR    = round(c(fitMeasures(fit_sem,      "srmr"),  fitMeasures(fit_extended, "srmr")),  3),
+  AIC     = round(c(fitMeasures(fit_sem,      "aic"),   fitMeasures(fit_extended, "aic")),   1)
+)
+
+fit_ext_compare %>%
+  kbl(caption = "Fit Comparison: Final SEM vs Extended SEM with Im19") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(1, bold = TRUE, background = "#d5f5e3")
+```
+
+
+Despite Im19 showing a significant path to Satisfaction in isolation, adding it (alongside direct paths from image dimensions to outcomes) substantially **worsens model fit**: CFI decreases from 0.977 to 0.946, RMSEA rises from 0.035 to 0.054, and SRMR nearly doubles from 0.041 to 0.098. Although AIC is lower in the extended model (reflecting the additional free parameters), the degradation in CFI, RMSEA and SRMR indicates that the added complexity hurts overall model structure more than it helps. The original full mediation SEM is therefore retained as the final model.
+
+
+Among the five items tested in the robustness model, Im19 ("Professional Organisation") is the only one that shows a significant direct effect on Satisfaction (sections 5.2–5.3). But despite the significant path, adding Im19 alongside direct image-to-outcome paths substantially worsens model fit, and the original full mediation SEM is retained.
+
+
+
+# Appendix {-}
+
+## Declaration on the Use of Generative AI Tools {-}
+
+AI tools were used during the preparation of this report to improve workflow efficiency, particularly for coding support and for formatting tables, graphics, and results in the HTML output. Claude was consulted to assist with technical implementation and visual presentation.
+
+The analysis itself, including the choice of methods, interpretation of findings, and final conclusions, was carried out independently by the authors.
+
+---
+
