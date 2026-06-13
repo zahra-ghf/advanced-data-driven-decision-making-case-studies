@@ -39,7 +39,7 @@ Path analysis
 Business analytics
 
 ## Repository Structure
-.
-├── case-study-1-heliotronics-experience-curve/
-├── case-study-2-smartphone-quality-factor-analysis/
-└── case-study-3-galeries-lafayette-sem/
+
+*case-study-1-heliotronics-experience-curve/
+*case-study-2-smartphone-quality-factor-analysis/
+*case-study-3-galeries-lafayette-sem/
