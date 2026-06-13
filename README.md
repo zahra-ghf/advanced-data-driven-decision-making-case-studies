@@ -1,6 +1,6 @@
-# Experience Curve Analysis — Heliotronics Case Study
+# Experience Curve Analysis - Heliotronics Case Study
 
-Business analytics case study — Advanced Data-Driven Decision Making,
+Business analytics case study - Advanced Data-Driven Decision Making,
 GSEM, University of Geneva (Prof. Marcel Paulssen)
 
 ## Project Overview
