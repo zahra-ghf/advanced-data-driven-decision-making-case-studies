@@ -1,6 +1,6 @@
-# Smartphone Quality Perceptions — Factor Analysis
+# Smartphone Quality Perceptions - Factor Analysis
 
-Business analytics case study — Advanced Data-Driven Decision Making,
+Business analytics case study - Advanced Data-Driven Decision Making,
 GSEM, University of Geneva (Prof. Marcel Paulssen)
 
 ## Project Overview
@@ -66,9 +66,9 @@ The analysis supports a multidimensional view of smartphone quality.
   LG → material quality
   
 ## Files
-- `factor_analysis.Rmd` — R Markdown source (full analysis)
-- `factor_analysis.html` — rendered output with tables and plots
-- `presentation.pdf` — case study presentation
+- `factor_analysis.Rmd` - R Markdown source (full analysis)
+- `factor_analysis.html` - rendered output with tables and plots
+- `presentation.pdf` - case study presentation
 
 ## Authors
 Group project (3 members): Zahra Ghafghazi, Giovanni Carta, Sophia Ropelewski.
