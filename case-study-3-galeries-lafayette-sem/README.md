@@ -70,13 +70,9 @@ The structural equation model provides a decision-support framework for understa
 
 ## Files
 
-```text
-.
-├── README.md
-├── galeries-lafayette-sem.Rmd
-├── galeries-lafayette-sem.html
-└── galeries-lafayette-sem-presentation-public.pdf
-```
+- `galeries-lafayette-sem.Rmd` - R Markdown source file containing the full analysis
+- `galeries-lafayette-sem.html` - rendered HTML report with tables, plots, and model outputs
+- `galeries-lafayette-sem-presentation-public.pdf` - public version of the case study presentation
 
 ## Authors
 Group project (3 members): Zahra Ghafghazi, Giovanni Carta, Sophia Ropelewski.
