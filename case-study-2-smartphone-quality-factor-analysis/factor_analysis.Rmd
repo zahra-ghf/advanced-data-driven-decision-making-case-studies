@@ -1,0 +1,1068 @@
+---
+title: "Case Study 2: Factor Analysis – Understanding Quality Perceptions of Smartphones"
+author: "Giovanni Carta, Zahra Ghafghazi, Sophia Ropelewski"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+---
+
+```{css, echo=FALSE}
+body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 15px; color: #2c3e50; line-height: 1.7; }
+h1, h2, h3 { color: #1a252f; font-weight: 700; border-bottom: 2px solid #2980b9; padding-bottom: 5px; margin-top: 2rem; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 9, fig.height = 6)
+
+library(tidyverse)
+library(psych)
+library(GPArotation)
+library(corrplot)
+library(kableExtra)
+library(broom)
+library(patchwork)
+
+```
+
+---
+
+# - Data Preparation
+
+As a first step, we start by checking the size of the dataset, and by getting the variables of interest. The dataset contains responses from 979 US smartphone customers who rated their device on 33 quality perception items (qd1-qd33) using 5-point scales.
+
+```{r data-load}
+# import the data
+data <- read.csv("Data File_Case_Study_Factor Analysis_MD.csv")
+
+# only select the quality perception items of interest
+quality_data <- data %>%
+  select(all_of(paste0("qd", 1:33)))
+
+# check the size
+cat("Sample size:", nrow(data), "\n")
+cat("Quality items:", ncol(quality_data), "\n")
+```
+
+## - Missing Data
+Next, we need to check for missing data and handle them in an appropriate way.
+
+```{r missing-data}
+# Count NAs per item and reshape to long format
+missing_summary <- quality_data %>%
+  # single-row data frame where each column contains its count of NA
+  summarise(across(everything(), ~ sum(is.na(.)))) %>% 
+  pivot_longer(everything(), names_to = "Item", values_to = "N_Missing") %>% # pivot the dataframe
+  filter(N_Missing > 0) %>% # only keep rows containing NA
+  mutate(Percentage = round(N_Missing / nrow(quality_data) * 100, 1))  # get the percentage
+
+missing_summary %>%
+  kbl(caption = "Items with missing values") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+Six items (qd22, qd26, qd28, qd29, qd31, qd33) each have 45 missing values. Below, we verify if the same 45 respondents are always missing across all six items.
+
+```{r missing-pattern}
+# verify if the NAs belong to the same rows
+n_block <- sum(is.na(quality_data$qd22) & is.na(quality_data$qd26) &
+               is.na(quality_data$qd28) & is.na(quality_data$qd29) &
+               is.na(quality_data$qd31) & is.na(quality_data$qd33))
+cat("Respondents missing on all six items:", n_block, "\n")
+```
+
+All 45 missing cases come from the same respondents. Since the affected cases represent less than 5% of the sample, we decide to remove the 45 rows containing a missing value.
+
+```{r drop-na}
+# drop the rows containing NA
+quality_data_complete <- quality_data %>% drop_na()
+cat("Complete-case n:", nrow(quality_data_complete), "\n")
+cat("Remaining missing values:", sum(is.na(quality_data_complete)), "\n")
+```
+
+---
+
+# - Exercise 1: Orthogonal Factor Analysis (Varimax)
+
+## - Factorability Assessment
+
+### - Correlation Matrix
+
+Now that we have cleaned our data, we first need to assess if factor analysis can be performed on it. For this, we calculate the correlation matrix below.
+
+```{r correlation-matrix, fig.height=8, fig.width=9}
+# Correlation matrix calculation
+cor_mat <- cor(quality_data_complete)
+
+corrplot(cor_mat, method = "color", type = "upper", tl.cex = 0.62, tl.col = "black",
+         col = colorRampPalette(c("#c0392b", "white", "#2980b9"))(200),
+         title = "Correlation Matrix - Quality Items (qd1-qd33)", mar = c(0,0,2,0))
+```
+
+```{r top-correlations}
+# Get the top 20 highest correlations between items
+cor_long <- as.data.frame(as.table(cor_mat)) %>%
+  setNames(c("Item_1", "Item_2", "r")) %>%
+  filter(as.character(Item_1) < as.character(Item_2)) %>%
+  mutate(abs_r = abs(r)) %>%
+  arrange(desc(abs_r))
+
+head(cor_long, 20) %>%
+  kbl(digits = 3, caption = "Top 20 pairwise correlations") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+The correlation matrix shows a pattern of moderate to high positive correlations between the items (shown in blue), with the values of the top 20 highest correlations values situated between 0.879 and 0.819. This suggests the existence of common latent factors.
+
+### - KMO and Bartlett's Test
+Before running factor analysis, we also calculate the KMO (Kaiser-Meyer-Olkin), which checks if variables share enough common variance, and perform the Bartlett's test, to see if the correlation matrix is an identity matrix or not. 
+
+```{r kmo-bartlett}
+# calculate overall KMO and Bartlett's test
+kmo_result      <- KMO(cor_mat)
+bartlett_result <- cortest.bartlett(cor_mat, n = nrow(quality_data_complete))
+
+cat("Overall KMO:", round(kmo_result$MSA, 3), "\n")
+cat("Bartlett chi-square:", round(bartlett_result$chisq, 2),
+    "| df:", bartlett_result$df,
+    "| p-value:", bartlett_result$p.value, "\n")
+```
+
+The overall KMO of **0.96** indicates excellent sampling adequacy. Bartlett's test is highly significant (p < .001), confirming the correlation matrix is sufficiently different from an identity matrix. Both criteria support proceeding with factor analysis. 
+
+### - Anti-Image Correlation Matrix
+
+In addition to the overall KMO result and the Bartlett's test, we can also have a look at the anti-image correlation matrix, which provides item-level evidence of factorability. The diagonal elements are the individual KMO (MSA) values for each item. Off-diagonal elements should be small in magnitude. This indicates that partial correlations between items are negligible once shared factor variance is removed.
+
+```{r anti-image}
+# print items with lowest MSA  using the previous calculate kmo
+msa_df <- data.frame(
+  Item = names(kmo_result$MSAi),
+  MSA  = round(kmo_result$MSAi, 3)
+) %>%
+  mutate(
+    Rating = case_when(
+      MSA >= 0.90 ~ "Excellent",
+      MSA >= 0.80 ~ "Good",
+      MSA >= 0.70 ~ "Acceptable",
+      MSA >= 0.60 ~ "Mediocre",
+      TRUE        ~ "Unacceptable"
+    )
+  ) %>%
+  arrange(MSA)  # lowest MSA first
+
+msa_df %>%
+  kbl(caption = "Item-level KMO (MSA) (lowest first)",
+      col.names = c("Item", "MSA", "Rating")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  column_spec(2, bold = TRUE,
+              color = ifelse(msa_df$MSA >= 0.70, "#27ae60", "#c0392b")) 
+```
+
+```{r anti-image-heatmap, fig.height=8, fig.width=9}
+# heatmap of the anti-image correlation matrix (diagonal suppressed for clarity)
+# low values are preferable
+anti_image_plot <- kmo_result$ImC
+diag(anti_image_plot) <- NA
+
+corrplot(anti_image_plot,
+         method       = "color",
+         type         = "upper",
+         tl.cex       = 0.62,
+         tl.col       = "black",
+         na.label     = "square",
+         na.label.col = "#bdc3c7",
+         col          = colorRampPalette(c("#c0392b", "white", "#2980b9"))(200),
+         title        = "Anti-Image Correlation Matrix (diagonal suppressed)",
+         mar          = c(0, 0, 2, 0))
+
+```
+
+The majority of off-diagonal anti-image correlations are close to zero, confirming that partial correlations are negligible and items share enough common variance. The single item with the lowest MSA is qd4 (0.65, mediocre), which we should monitor.
+
+---
+
+## - Number of Factors Assessment
+
+### - Initial Assessment
+
+We have determined that the data is suitable for factor analysis. The next step is to decide on the number of factors we need. Three criteria will be used to determine this number: The Kaiser rule (eigenvalues greater than 1), a scree plot, and parallel analysis.
+
+```{r eigenvalues-screeplot}
+# Calculation of the eigenvalues
+eigen_values <- eigen(cor_mat)$values
+
+# create a datable with the 12 highest eigenvalues, their value and cumulative variance
+data.frame(Factor = 1:12,
+           Eigenvalue = round(eigen_values[1:12], 3),
+           Cum_Percentage = round(cumsum(eigen_values[1:12]) / sum(eigen_values) * 100, 1)) %>%
+  kbl(caption = "Eigenvalues (first 12 factors)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(which(eigen_values[1:12] >= 1), bold = TRUE, background = "#ebf5fb")
+```
+
+We first check the eigenvalue bar chart below, which shows the 12 factors with the highest eigenvalues and percentage of variance explained. The bar chart tells us that 8 factors have an eigenvalue above 1.
+
+```{r screeplot}
+# screeplot
+plot(eigen_values[1:15], type = "b", pch = 19, col = "#2980b9",
+     main = "Scree Plot", xlab = "Factor", ylab = "Eigenvalue")
+abline(h = 1, col = "#c0392b", lty = 2)
+```
+
+With the screeplot alone, it is difficult to determine where the "elbow" is. Using the Kaiser criterion (eigenvalue above 1, red dotted line), we see where the limit would be. 
+
+```{r parallel-analysis}
+# run parallel analysis
+fa.parallel(quality_data_complete, fa = "fa", fm = "pa",
+            main = "Parallel Analysis - Factor Retention")
+```
+
+The Kaiser rule retains 8 factors, the scree plot elbow falls between 7 and 8 and parallel analysis suggests 8. From the above results, we conclude that the 8-factor solution seem to be the best starting point. But to make the analysis complete, we will also calculate and compare 7 and 9-factor solutions in the following sections.
+
+### - Comparison of possible solutions
+As stated previously, we try out 3 different solutions : 7, 8 and 9-factor solutions using $varimax$ method (orthogonal factor analysis).
+
+```{r fa-candidates}
+fa_7 <- fa(quality_data_complete, nfactors = 7, fm = "pa", rotate = "varimax")
+fa_8 <- fa(quality_data_complete, nfactors = 8, fm = "pa", rotate = "varimax")
+fa_9 <- fa(quality_data_complete, nfactors = 9, fm = "pa", rotate = "varimax")
+
+cat("=== 7-Factor Solution ===\n"); print(fa_7, cut = 0.30, sort = TRUE)
+cat("\n=== 8-Factor Solution ===\n"); print(fa_8, cut = 0.30, sort = TRUE)
+cat("\n=== 9-Factor Solution ===\n"); print(fa_9, cut = 0.30, sort = TRUE)
+```
+
+### - Fit Comparison
+
+We then compare the 3 fits against each other.
+```{r model-comparison}
+# fit comparison
+data.frame(
+  Solution = c("7 Factors", "8 Factors", "9 Factors"),
+  RMSEA    = round(c(fa_7$RMSEA[1], fa_8$RMSEA[1], fa_9$RMSEA[1]), 3),
+  TLI      = round(c(fa_7$TLI,      fa_8$TLI,      fa_9$TLI),      3),
+  BIC      = round(c(fa_7$BIC,      fa_8$BIC,      fa_9$BIC),      1),
+  Var_Pct  = round(c(sum(fa_7$Vaccounted[2,]),
+                     sum(fa_8$Vaccounted[2,]),
+                     sum(fa_9$Vaccounted[2,])) * 100, 1)
+) %>%
+  kbl(caption = "Fit indices: 7-, 8-, and 9-factor solutions",
+      col.names = c("Solution", "RMSEA", "TLI", "BIC", "Variance Explained (%)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(2, bold = TRUE, background = "#eafaf1")
+```
+The **7-factor** solution merges two factors into one factor, causing cross-loadings and reducing interpretability. The **9-factor solution** only has a marginal fit improvement, but the ninth factor is defined almost entirely by qd4 and qd23. In addition, their loadings are not very high (approx. equal to 0.4), and we saw previously that qd4 is an item to be monitored. This suggests overfactoring. The **8-factor solution** provides the best balance of fit, parsimony, and interpretability, with good loading values (above 0.6 for most of them). Only the items qd23 and qd4 have no important loading value, and qd8 has a loading at the limit of 0.6 (equal to 0.56) for one factor, and a cross-loading value of 0.34 for another factor. For all those reason, we will continue with the 8-factor analysis in the next parts of this analysis. 
+
+### - Item Refinement
+In the previous section, we have determined the number of factors. It is now time to refine the solution by trying to remove some items. 
+
+We have previously identified items qd4 and qd23 which do not have important loading values with the 8-factor solution. We therefore try to remove them and recalculate the factor analysis. We also observed that qd8 has an non-negligible cross-loading, and therefore try an additional solution in which this item is also removed. Finally, qd31 also has a cross-loading (but its loading is slightly more important, >0.6). We try a final solution without this item too. 
+
+```{r item-refinement}
+# Scenario 1: Remove qd4 and qd23
+quality_data_r1 <- quality_data_complete %>% select(-qd4, -qd23)
+fa_r1 <- fa(quality_data_r1, nfactors = 8, fm = "pa", rotate = "varimax")
+print(fa_r1, cut = 0.30, sort = TRUE)
+
+# Scenario 2: Additionally remove qd8 
+quality_data_final_ortho <- quality_data_complete %>% select(-qd4, -qd23, -qd8)
+fa_final_ortho <- fa(quality_data_final_ortho, nfactors = 8, fm = "pa", rotate = "varimax")
+print(fa_final_ortho, cut = 0.30, sort = TRUE)
+
+# Scenario 3: Check effect of additionally removing qd31
+quality_data_r3 <- quality_data_complete %>% select(-qd4, -qd23, -qd8, -qd31)
+fa_r3 <- fa(quality_data_r3, nfactors = 8, fm = "pa", rotate = "varimax")
+print(fa_r3, cut = 0.30, sort = TRUE)
+```
+
+**Items removed and justification:**
+
+- **qd4** ("my smartphone is really unique"): was removed due to a relatively low MSA (0.65) and the presence of cross-loadings across multiple factors, indicating a lack of clear association with a single latent dimension. This also makes its interpretation less stable. 
+- **qd8** ("extra features usually function"): was removed because it shows a relatively low primary loading and non-negligible cross-loadings across multiple factors, meaning it does not load clearly on a single factor and leads to ambiguous interpretation. 
+- **qd23** ("prestigious item"): was removed because it does not exhibit a strong and distinct loading on any single factor and appears to overlap conceptually with other items (e.g. qd4), suggesting redundancy rather than a unique dimension. 
+- **qd31 retained**: was retained despite minor cross-loadings, as it shows a sufficiently strong primary loading on the Durability factor and contributes meaningfully to its interpretation. Removing it would weaken the factor structure without improving overall clarity. 
+
+---
+
+## - Final Orthogonal Factor Analysis 
+
+### - Loading Heatmap
+
+The final solution has been determined (8 factors, items qd4, qd8 and qd23 removed). All items show unambiguous loading patterns on a single factor. No item has a primary loading below 0.40, and no meaningful cross-loadings above 0.30 are present in the final solution. 
+```{r loading-heatmap, fig.height=7, fig.width=10}
+factor_names <- colnames(fa_final_ortho$loadings)
+
+# plot loading heatmap
+loadings_df <- as.data.frame(unclass(fa_final_ortho$loadings)) %>%
+  setNames(factor_names) %>%
+  rownames_to_column("Item") %>%
+  pivot_longer(-Item, names_to = "Factor", values_to = "Loading") %>%
+  mutate(Loading_thresh = ifelse(abs(Loading) >= 0.30, Loading, NA),
+         Item = factor(Item, levels = rev(unique(Item))))
+
+ggplot(loadings_df, aes(x = Factor, y = Item, fill = Loading_thresh)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = ifelse(!is.na(Loading_thresh),
+                               sprintf("%.2f", Loading_thresh), "")),
+            size = 2.7, colour = "white", fontface = "bold") +
+  scale_fill_gradient2(low = "#c0392b", mid = "white", high = "#2980b9",
+                       midpoint = 0, na.value = "#ecf0f1", limits = c(-1,1),
+                       name = "Loading") +
+  labs(title = "Factor Loading Heatmap (|loading| >= 0.30)",
+       subtitle = "Grey = below threshold", x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"), panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+### -  Factor naming table
+
+Each item is assigned to the factor with the highest absolute loading. Factor labels are derived from the quality literature (Table 1 of the case study), using the text labels of each item, and deciding what those items best describe as an overall quality factor with the help of the previous calculated loading heatmap. They are saved in $factor_names$.
+
+```{r factor-naming-table}
+# Item text labels 
+item_text <- c(
+  qd1  = "Consistently performs",
+  qd2  = "Overall attractiveness",
+  qd3  = "User experience with functions",
+  qd5  = "Performance is excellent",
+  qd6  = "Innovativeness of extra features",
+  qd7  = "Overall performance",
+  qd9  = "Appeal of design",
+  qd10 = "Competence of customer service staff",
+  qd11 = "Learning to operate smartphone",
+  qd12 = "Performs core functions well",
+  qd13 = "Ease of use",
+  qd14 = "Promptness of customer service",
+  qd15 = "Endurance of materials",
+  qd16 = "Functioning speed",
+  qd17 = "Excitement from extra features",
+  qd18 = "Robustness of materials",
+  qd19 = "Professionalism of service staff",
+  qd20 = "Look and feel",
+  qd21 = "Accessibility of customer service",
+  qd22 = "Severity of defects/glitches",
+  qd24 = "Responsiveness of customer service",
+  qd25 = "Number of additional features",
+  qd26 = "Time span without major defects",
+  qd27 = "Overall fit and finish",
+  qd28 = "Works under heavy usage",
+  qd29 = "Frequency of defects/glitches",
+  qd30 = "Usability",
+  qd31 = "Life span",
+  qd32 = "Standard of materials used",
+  qd33 = "Probability of failure/malfunction"
+)
+
+# Factor names
+factor_names <- c("Serviceability", "Performance", "Aesthetics", "Ease of Use",
+                  "Reliability", "Material Quality", "Features", "Durability")
+
+# factor naming table
+# extract loadings, assign factor names, and map item text labels
+loadings_raw        <- as.data.frame(unclass(fa_final_ortho$loadings))
+colnames(loadings_raw) <- factor_names
+item_ids            <- tolower(rownames(loadings_raw))  # ensure lowercase
+
+# build table => assign each item to its highest-loading factor
+naming_table <- data.frame(
+  Item            = item_ids,
+  Item_Text       = item_text[item_ids],
+  Primary_Factor  = factor_names[apply(loadings_raw, 1, function(x) which.max(abs(x)))],
+  Primary_Loading = apply(loadings_raw, 1, function(x) round(max(abs(x)), 2)),
+  stringsAsFactors = FALSE
+) %>%
+  arrange(Primary_Factor, desc(Primary_Loading))
+
+# display table grouped by factor using pack_rows()
+naming_table %>%
+  kbl(col.names = c("Item", "Item Content", "Factor", "Loading"),
+      caption = "Factor Naming Table") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = TRUE) %>%
+  column_spec(4, bold = TRUE, color = "#2980b9") %>%
+  { tbl <- .
+    factors <- unique(naming_table$Primary_Factor)
+    for (f in factors) {
+      idx <- which(naming_table$Primary_Factor == f)
+      tbl <- pack_rows(tbl, f, min(idx), max(idx))
+    }
+    tbl
+  }
+
+```
+
+
+### - Communalities
+
+Communalities calculation should also be performed when performing factor analysis. They indicate how much of each item's variance is captured by the 8-factor solution. Values above 0.50 are considered good, while values 
+below 0.40 suggest the item is poorly represented by the extracted factors. The uniqueness (given by u2 = 1 - h2) reflects the proportion of variance that remains unexplained.
+
+```{r communalities, fig.height=5, fig.width=9}
+# calculate communalities table, sorted from highest to lowest h2
+comm_df <- data.frame(
+  Item      = names(fa_final_ortho$communality),
+  Item_Text = item_text[names(fa_final_ortho$communality)],
+  h2        = round(fa_final_ortho$communality, 3),
+  u2        = round(fa_final_ortho$uniquenesses, 3),
+  stringsAsFactors = FALSE
+) %>% arrange(desc(h2))
+
+# print table, and highlight items with h2 < 0.40 
+comm_df %>%
+  kbl(col.names = c("Item", "Content", "Communality (h2)", "Uniqueness (u2)"),
+      caption = "Communalities - Final 8-Factor Solution") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = TRUE) %>%
+  row_spec(which(comm_df$h2 < 0.40), background = "#fef9e7")
+
+#barchart of communalities
+# blue = h2 >= 0.50 (good), light blue = h2 < 0.50 (moderate)
+# red dashed line = 0.50 threshold, orange dotted = 0.40 minimum
+ggplot(comm_df, aes(x = reorder(Item, h2), y = h2,
+                    fill = ifelse(h2 >= 0.50, "High", "Moderate"))) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = 0.50, linetype = "dashed", colour = "#c0392b") +
+  geom_hline(yintercept = 0.40, linetype = "dotted", colour = "#e67e22") +
+  scale_fill_manual(values = c("High" = "#2980b9", "Moderate" = "#aed6f1"), name = NULL) +
+  coord_flip() +
+  labs(title = "Communalities for the final 8-Factor PAF solution", x = NULL, y = "h2") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+```
+
+As one can observe from the table and the barchart above, communalities range from approximately 0.60 to 0.80, indicating that the 8-factor structure explains a substantial proportion of each item's variance.
+
+### - Cronbach's Alpha per factor check
+
+Cronbach's alpha is computed for the final 8-factor solution. This gives us an additional consistency check for the assignement of the items to each factor. 
+
+```{r cronbach-alpha}
+# item assignments for the final 8-factor solution
+factor_items_8 <- list(
+  "Serviceability" = c("qd10","qd14","qd19","qd21","qd24"),
+  "Performance"      = c("qd1","qd5","qd7","qd12","qd16"),
+  "Aesthetics"       = c("qd2","qd9","qd20","qd27"),
+  "Ease of Use"      = c("qd3","qd11","qd13","qd30"),
+  "Material Quality" = c("qd15","qd18","qd32"),
+  "Reliability"      = c("qd22","qd29","qd33"),
+  "Features"         = c("qd6","qd17","qd25"),
+  "Durability"       = c("qd26","qd28","qd31")
+)
+
+# compute alpha for each factor
+alpha_8 <- do.call(rbind, Filter(Negate(is.null),
+  lapply(names(factor_items_8), function(f) {
+    items_ok <- factor_items_8[[f]][factor_items_8[[f]] %in% names(quality_data_final_ortho)]
+    if (length(items_ok) < 2) return(NULL)
+    a <- psych::alpha(quality_data_final_ortho[, items_ok, drop = FALSE], warnings = FALSE)
+    data.frame(
+      Factor  = f,
+      N_Items = length(items_ok),
+      Alpha   = round(a$total$raw_alpha, 3),
+      Rating  = case_when(
+        a$total$raw_alpha >= 0.90 ~ "Excellent",
+        a$total$raw_alpha >= 0.80 ~ "Good",
+        a$total$raw_alpha >= 0.70 ~ "Acceptable",
+        TRUE                      ~ "Questionable"
+      ),
+      stringsAsFactors = FALSE
+    )
+  })
+))
+
+# show table
+alpha_8 %>%
+  kbl(caption = "Cronbach's Alpha for the 8-Factor Solution",
+      col.names = c("Factor", "N Items", "Alpha", "Rating")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  column_spec(3, bold = TRUE,
+              color = ifelse(alpha_8$Alpha >= 0.70, "#27ae60", "#c0392b"))
+```
+
+From the above results, we indeed see that the chosen solution is a good choice, with Cronbach's alpha values above 0.85 for all 8 factors. 
+
+---
+
+## - Principal Component Analysis (PCA)
+
+A PCA with varimax rotation is run on the same 30-item set to verify whether the 8-factor structure is also robust to the choice of extraction method.
+
+```{r pca}
+# PCA calculation using the previously chosen 8 factor solution
+pca_final <- principal(quality_data_final_ortho, nfactors = 8, rotate = "varimax")
+print(pca_final, cut = 0.30, sort = TRUE)
+```
+
+```{r paf-pca-comparison}
+# Put the eigenvalues of each method in a table for better comparison and display it
+data.frame(
+  Factor      = factor_names,
+  PAF_Var_Pct = round(fa_final_ortho$Vaccounted[2,] * 100, 2),
+  PCA_Var_Pct = round(pca_final$Vaccounted[2,]      * 100, 2),
+  Difference  = round((pca_final$Vaccounted[2,] -
+                       fa_final_ortho$Vaccounted[2,]) * 100, 2)
+) %>% 
+  kbl(caption = "Variance explained: PAF vs PCA",
+      col.names = c("Factor","PAF (%)","PCA (%)","Difference")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+PCA produced the same eight-factor structure as principal axis factoring (PAF). This consistency strengthens confidence in the retained solution. The loadings are slightly higher in PCA, which is expected because PCA is based on total variance (it includes unique variance in its components), whereas factor analysis focuses only on shared variance among variables. Despite this difference in extraction logic, the interpretation of all eight factors remains identical across the two methods, confirming the robustness of the final solution.
+
+---
+
+## - Eigenvalues and relevance for Repurchase Behaviour
+
+```{r eigenvalue-table}
+# get the ss loadings for each factor of the PAF and put them in a dataframe, 
+# as well as their variance and cumulative variance
+eigen_final_df <- data.frame(
+  Factor      = factor_names,
+  SS_Load     = round(fa_final_ortho$Vaccounted[1,], 3),
+  Var_Percentage  = round(fa_final_ortho$Vaccounted[2,] * 100, 2),
+  Cum_Percentage  = round(cumsum(fa_final_ortho$Vaccounted[2,]) * 100, 2)
+)
+
+# show table
+eigen_final_df %>%
+  kbl(caption = "SS Loadings for the final 8-Factor PAF solution",
+      col.names = c("Factor", "SS Loadings", "Variance (%)", "Cumulative (%)")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r eigenvalue-barchart, fig.height=5, fig.width=9}
+# plot the previous table as a bar chart
+
+dim_colours <- c("#4db6ac","#ffd54f","#ff8a65","#90a4ae",
+                 "#ce93d8","#bcaaa4","#90caf9","#a5d6a7")
+
+ggplot(eigen_final_df,
+       aes(x = reorder(Factor, -SS_Load), y = SS_Load, fill = Factor)) +
+  geom_col(width = 0.7, show.legend = FALSE) +
+  geom_text(aes(label = paste0(SS_Load, "\n(", Var_Percentage, "%)")),
+            vjust = -0.3, size = 3.2, fontface = "bold") +
+  scale_fill_manual(values = setNames(dim_colours, factor_names)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+  labs(title = "SS Loadings by Quality Dimension (PAF + Varimax)",
+       x = "Quality Dimension", y = "SS Loadings") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        panel.grid.major.x = element_blank())
+```
+
+Each factor's SS loadings reflect how strongly and broadly that factor is defined by the quality items. A dimension with large SS loadings loads heavily on many items, meaning it captures a rich and well measured quality signal. Customers responses to those items move together consistently. In our case, that dimension would be Serviceability, which emerges as the most clearly and consistently measured construct across the item set. If it also turns out to be a significant predictor of repurchase intention, which will be explored in the next exercise. This suggests that a well-defined factor can also be commercially relevant when it significantly predicts repurchase intention . On the other hand, a factor with low SS loadings is tied to fewer or weaker item relationships, capturing a narrower quality signal. It may still predict repurchase intention in specific segments (for example, heavy users for whom Durability matters) but its overall explanatory power across the full sample will tend to be smaller, because the factor itself is less broadly represented in the data.
+
+
+---
+
+# - Exercise 2: Oblique Factor Analysis (Promax)
+
+## - Oblique Factor Analysis
+### - Overall view
+
+Given that quality dimensions are conceptually related, we expect factors to be correlated. Therefore, an oblique rotation (Promax) is expected to be appropriate. In this second exercice, an oblique factor analysis is run on the final 30-item set using Promax rotation, which allows factors to correlate and provides a more realistic representation of the quality structure.
+
+```{r oblique-fa}
+# perform an oblique factor analysis and print the results
+fa_oblique <- fa(quality_data_final_ortho, nfactors = 8, fm = "pa",
+                 rotate = "promax", scores = "regression")
+print(fa_oblique, cut = 0.30, sort = TRUE)
+```
+
+The pattern matrix, which displays the loadings, is very clean, with no cross-loadings at all. It has the same structure as the orthogonal solution. We now want to study the intercorrelation between factors, which can be done by analyzing the phi matrix. 
+
+### - Phi matrix
+
+```{r phi-matrix}
+# Factor inter-correlations 
+phi_mat <- round(fa_oblique$Phi, 2)
+rownames(phi_mat) <- colnames(phi_mat) <- factor_names
+
+# show it as a table
+as.data.frame(phi_mat) %>%
+  kbl(caption = "Factor intercorrelation matrix (Phi): Promax Solution") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+```
+
+```{r phi-heatmap, fig.height=5.5, fig.width=6}
+# show it as a heatmap for better interpretation
+corrplot(phi_mat,
+         method   = "circle",
+         type     = "lower",
+         addCoef.col = "black",
+         number.cex  = 0.75,
+         tl.col   = "black",
+         tl.srt   = 45,
+         tl.cex   = 0.8,
+         col      = colorRampPalette(c("white", "#e57373", "#c0392b"))(200),
+         title    = "Factor Correlation Matrix (Promax)",
+         mar      = c(0, 0, 2, 0),
+         cl.lim   = c(0, 1))
+```
+
+All 8 factors are positively and moderately to strongly correlated, ranging from 0.40 (Serviceability with Material quality) to 0.69 (Performance with Features), which is the highest correlation. This means that Performance and Features share the most overlap (feature-rich phone tends to be perceived as higher performing overall). The fact that all correlations are above 0.3 validates the choice of oblique rotation: the quality dimensions are not independent in consumers minds. Varimax assumption of orthogonality would have been unrealistic. But correlations remain well below 0.85, so each dimension still retains its own identity.
+
+### - Factor scores and labels
+
+After performing the analysis, we compute factor scores for the factors and name and label them
+appropriately. We print out the results for the 6 first respondents.
+
+```{r factor-scores}
+# get the scores
+factor_scores <- as.data.frame(fa_oblique$scores) %>%
+  setNames(gsub(" ", "_", factor_names)) # converts to a data frame and renames the columns
+
+# get the first 6 respondents
+head(factor_scores) %>%
+  kbl(digits = 3, caption = "Regression-based factor scores (first 6 respondents)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+```
+
+By doing this, a respondent can now be described by 8 factor scores instead of their raw item responses. This is a compressed representation of where they stand on each latent dimension. These scores will now be used in further regression analysis.
+
+## - Regression Analysis
+### - Outcome variables: WTP and Repurchase Intention (RI)
+As a next step, needed for the regression analysis, we compute mean scores for the three willingness to pay premium items (wtp1-wtp3) and the two repurchase intention items (ri1-ri2).
+
+```{r outcomes}
+# get the data from the start, and drop the NAs again
+analysis_data <- data %>%
+  select(all_of(c(paste0("qd", 1:33), "wtp1","wtp2","wtp3","ri1","ri2"))) %>%
+  drop_na()
+
+# calculate the mean of WTP and RI
+outcomes <- analysis_data %>%
+  transmute(
+    WTP_mean = rowMeans(select(., wtp1, wtp2, wtp3), na.rm = TRUE),
+    RI_mean  = rowMeans(select(., ri1, ri2),          na.rm = TRUE)
+  )
+
+summary(outcomes) %>%
+  kbl(caption = "Descriptive statistics: WTP and RI mean scores") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# combine the factor scores with the mean of wtp and ri
+reg_data <- bind_cols(factor_scores, outcomes)
+```
+
+To test if the removed items in the factor analysis also have an important contribution to the regression analysis, we add them in another dataset below, which will also be tested.
+
+```{r removed-items-add}
+dropped_items <- quality_data_complete %>%
+  select(qd4, qd8, qd23) %>%
+  slice(1:nrow(factor_scores))
+
+dropped_items_scaled <- dropped_items %>%
+  mutate(across(everything(), scale)) %>%
+  rename(qd4_scaled = qd4, qd8_scaled = qd8, qd23_scaled = qd23)
+
+reg_data_extended <- bind_cols(reg_data, dropped_items_scaled)
+```
+
+In the next section, we run a regression analysis with the factor scores of the quality dimensions as independent and both the mean score of willingness to pay premium and repurchase intention
+as dependent variables.
+
+
+### - Regression Analysis: Willingness to Pay Premium (WTP)
+Using the mean for WTP computed previously, we perform a linear regression fit with WTP as the dependent variable and the 8 factors as independent variables. 
+
+```{r reg-wtp}
+# perform linear regression with WTP as the dependent variable (using the mean computed previously)
+model_wtp <- lm(WTP_mean ~ Serviceability + Performance + Aesthetics + Ease_of_Use +
+                            Material_Quality + Reliability + Features + Durability,
+                data = reg_data)
+summary(model_wtp)
+```
+
+From the WTP regression, we get $R^2 = 0.374$, meaning that the quality dimensions explain about 37% of variance in willingness to pay premium. The significant factors are Ease of Use ($\beta = 0.290$, p < 0.001), Performance ($\beta = 0.203$, p < 0.01), Features ($\beta = 0.190$, p < 0.01), Serviceability ($\beta = 0.151$, p < 0.01), and Reliability ($\beta  = 0.158$, p < 0.05). Non-significant factors are Material quality, Aesthetics and Durability.
+
+Below, an additional regression is tested with the 3 items removed previously (qd4, qd8 and qd23).
+
+```{r reg-wtp-additems}
+# same regression with additional items
+model_wtp_ext <- lm(
+  WTP_mean ~ Serviceability + Performance + Aesthetics + Ease_of_Use +
+             Material_Quality + Reliability + Features + Durability +
+             qd4_scaled + qd8_scaled + qd23_scaled,
+  data = reg_data_extended
+)
+summary(model_wtp_ext)
+```
+
+
+### - Regression Analysis: Repurchase Intention (RI)
+We repeat a similar analysis, but this time with RI as the dependent variable.
+
+```{r reg-ri}
+# perform linear regression on the RI dependent variable
+model_ri <- lm(RI_mean ~ Serviceability + Performance + Aesthetics + Ease_of_Use +
+                          Material_Quality + Reliability + Features + Durability,
+               data = reg_data)
+summary(model_ri)
+```
+
+From the above results, we have $R^2 = 0.435$, meaning the 8 quality dimensions together explain 43.5% of the variance in repurchase intention, higher than for WTP. This is solid result for a consumer behavior regression, and the F-test confirms the model is highly significant overall.
+
+The most significant predictors are Performance ($\beta = 0.347$, p < 0.001), Ease of Use ($\beta = 0.314$, p < 0.001), Durability ($\beta = 0.147$, p < 0.05), and Serviceability ($\beta = 0.114$, p < 0.05). The non-significant factors are Reliability, Aesthetics, Material Quality, and Features.
+
+From a managerial interpretation, this means that Performance and Ease of Use are the strongest drivers for RI. A smartphone that performs its core functions well and is easy to use is strongly associated with repurchase intention. Durability and Serviceability are secondary but still important: customers care that the phone lasts and that support is available when needed. On the other hand, Aesthetics, Features, and Reliability do not significantly predict repurchase.
+
+Comparing it with the WTP regression, the difference is Durability and Features. Durability matters for repurchase but not for WTP. On the other hand, the Features factor drives WTP but not RI. Customers will pay more for an innovative, feature-rich phone, but features alone don't make them come back. What brings them back is whether it lasts. Reliability follows a similar pattern, significant for WTP but not RI. 
+
+As before, an additional regression is tested with the 3 items qd4, qd8 and qd23.
+
+```{r reg-ri-additems}
+# same regression with additional items
+model_ri_ext <- lm(
+  RI_mean ~ Serviceability + Performance + Aesthetics + Ease_of_Use +
+            Material_Quality + Reliability + Features + Durability +
+            qd4_scaled + qd8_scaled + qd23_scaled,
+  data = reg_data_extended
+)
+summary(model_ri_ext)
+```
+
+For both the WTP and RI regressions, the $R^2$ is only slightly better. Therefore, to keep a consistent and simpler model, we keep the regression with the 8 factors onyl as the main solution for the rest of this work.
+
+
+### - Coefficient comparison plot
+
+A summary of the above findings can be viewed in the plot below, which compares the coefficients of both regressions against each other. 
+
+```{r coef-plot, fig.height=5.5, fig.width=9}
+# combine regression results from both models into one data frame
+# tidy() extracts coefficients, std errors, p-values, and CI bounds
+coef_all <- bind_rows(
+  tidy(model_wtp, conf.int = TRUE) %>% mutate(Outcome = "WTP"),
+  tidy(model_ri,  conf.int = TRUE) %>% mutate(Outcome = "RI")
+) %>%
+  filter(term != "(Intercept)") %>%       # drop intercept
+  mutate(term = gsub("_", " ", term), sig = p.value < 0.05)
+
+# plot coefficients with 95% CI error bars, side by side for WTP and RI
+# solid point = significant (p < .05), open circle = not significant
+ggplot(coef_all, aes(x = reorder(term, estimate), y = estimate, colour = Outcome)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.25,
+                position = position_dodge(0.5)) +
+  geom_point(aes(shape = sig), size = 3.5, position = position_dodge(0.5)) +
+  scale_colour_manual(values = c("WTP" = "#2980b9", "RI" = "#27ae60")) +
+  scale_shape_manual(values = c("TRUE" = 16, "FALSE" = 1),
+                     labels = c("TRUE" = "p < .05", "FALSE" = "n.s.")) +
+  coord_flip() +
+  labs(title = "Regression Coefficients: WTP vs Repurchase Intention",
+       subtitle = "Error bars = 95% CI | Solid = significant (p < .05), Open = n.s.",
+       x = NULL, y = "Coefficient", colour = "Outcome", shape = "Significance") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+```
+
+**Interpretation:**
+
+- For WTP (R2 approx. 0.37), the significant positive predictors are Performance, Ease of Use, Serviceability, Reliability, and Features. Ease of Use has the strongest effect: Customers who find the phone intuitive are most willing to pay above the market price.
+
+- For RI (R2 approx. 0.44), the significant positive predictors are Performance, Ease of Use, Serviceability, and Durability. Performance and Ease of Use are the strongest drivers. As discussed above, Durability uniquely predicts repeat purchase but not WTP. Serviceability is a significant predictor in both models, highlighting that after-sale support is commercially as important as the product itself.
+
+The results are also summarized below, with each of the eight quality dimensions linked to the established 
+marketing literature.
+
+```{r reg-summary}
+data.frame(
+  Dimension          = factor_names,
+  Literature_Anchor  = c(
+    "Serviceability (Garvin 1988)", "Performance (Garvin 1988)",
+    "Aesthetics (Garvin 1988)",     "Ease of Use (Brucks et al. 2000)",
+    "Reliability (Garvin 1988)",      "Conformance / Materials",
+    "Features (Garvin 1988)",       "Durability (Garvin 1988)"
+  ),
+  WTP_Driver = c("Yes *","Yes *","No","Yes **","Yes *","No","Yes *","No"),
+  RI_Driver  = c("Yes *","Yes **","No","Yes **","No","No","No","Yes *"),
+  stringsAsFactors = FALSE
+) %>%
+  kbl(col.names = c("Quality Dimension","Literature Anchor","WTP Driver","RI Driver"),
+      caption = "Quality Dimensions as Drivers of WTP and Repurchase Intention") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE) %>%
+  footnote(general = "** = strongest predictor | * = significant (p < .05) | No = not significant")
+```
+
+
+---
+
+## - Brand-Level Analysis
+
+### - Sample by brand
+
+In the previous sections, we did not take into account the different brands when doing the analysis. Now, we want to see if the results of the regression analysis for RI differ across brands, especially for Samsung vs Apple vs LG. We start by selecting the brand variables for our analysis.
+
+```{r brand-distribution}
+# select data again including brand variable, drop NAs
+# and convert numeric brand codes to labelled factor
+analysis_data_brand <- data %>%
+  select(all_of(c(paste0("qd", 1:33),
+                  "wtp1","wtp2","wtp3","ri1","ri2","brandrec"))) %>%
+  drop_na() %>%
+  mutate(Brand = factor(brandrec, levels = 1:5,
+                        labels = c("Apple","Samsung","LG","Motorola","Others")))
+
+# display sample size and percentage per brand
+table(analysis_data_brand$Brand) %>%
+  as.data.frame() %>%
+  setNames(c("Brand","N")) %>%
+  mutate(Percentage = round(N / sum(N) * 100, 1)) %>%
+  kbl(caption = "Sample size by brand") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+Apple brand makes up 55% of the data, followed by Samsung with approx. 24%. Only 7% of the data concerns LG.
+
+### - Factor scores by brand
+To examine whether perceived quality dimensions differ across smartphone brands, the oblique 8 factor solution is calculated again on the brand labelled subsample. Factor scores are extracted for each respondent, along with their mean WTP and RI scores. Mean factor scores are then computed per brand, providing a standardised profile of how each brand is perceived across the eight quality dimensions. 
+Since factor scores are standardised, values above 0 indicate above-average perception and values below 0 indicate below-average perception relative to the overall sample.
+
+```{r brand-factor-scores}
+# Select only the 30 retained quality items from the brand dataset
+final_items_brand <- analysis_data_brand %>%
+  select(all_of(names(quality_data_final_ortho)))
+
+# Run oblique PAF again on the brand subset to get brand-specific factor scores
+fa_oblique_brand <- fa(final_items_brand, nfactors = 8, fm = "pa",
+                       rotate = "promax", scores = "regression")
+
+# Extract factor scores and rename columns to match factor names
+factor_scores_brand <- as.data.frame(fa_oblique_brand$scores) %>%
+  setNames(gsub(" ", "_", factor_names))
+
+# Compute outcome means (WTP and RI) and retain brand label per respondent
+outcomes_brand <- analysis_data_brand %>%
+  transmute(
+    Brand    = Brand,
+    WTP_mean = rowMeans(select(., wtp1, wtp2, wtp3), na.rm = TRUE),
+    RI_mean  = rowMeans(select(., ri1, ri2),          na.rm = TRUE)
+  )
+
+# Combine factor scores, outcomes and brand into one regression dataset
+reg_data_brand <- bind_cols(factor_scores_brand, outcomes_brand)
+```
+
+```{r brand-means-table}
+# Compute mean factor score for each of the 8 factors, grouped by brand
+brand_means <- reg_data_brand %>%
+  group_by(Brand) %>%
+  summarise(across(Serviceability:Durability, ~ round(mean(.), 2)), .groups = "drop")
+
+# display the table 
+brand_means %>%
+  kbl(caption = "Mean factor scores by brand (standardised)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+### - Brand comparison
+To visualise differences in quality perceptions across the 3 brands of interest, mean standardised factor scores are plotted side by side for Apple, Samsung and LG. Each bar represents a brands average score on a given quality dimension relative to the overall sample mean. Bar to the right of zero indicate above-average perception, bars to the left indicate below-average. This allows for a direct comparison of 
+each brands perceived strengths and weaknesses across the eight quality dimensions.
+
+```{r brand-barplot, fig.height=6, fig.width=10}
+# filter to the three main brands and reshape to long format for plotting
+brand_long <- brand_means %>%
+  filter(Brand %in% c("Apple","Samsung","LG")) %>%
+  pivot_longer(-Brand, names_to = "Dimension", values_to = "Score") %>%
+  mutate(Dimension = gsub("_"," ", Dimension))
+
+# Plot bar chart
+ggplot(brand_long, aes(x = Dimension, y = Score, fill = Brand)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  scale_fill_manual(values = c("Apple"="#2c3e50","Samsung"="#2980b9","LG"="#e74c3c")) +
+  coord_flip() +
+  labs(title = "Brand Comparison on quality dimensions",
+       subtitle = "Mean standardised factor scores: Apple vs Samsung vs LG",
+       x = NULL, y = "Mean factor score") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom",
+        panel.grid.major.y = element_blank())
+```
+
+Looking at the obtained bar chart, Apple consistently scores above the sample average across all eight quality dimensions, with particularly strong scores on Performance and Features. Samsung scores close to zero across most dimensions, suggesting average perceptions overall, with a slight positive value for Material Quality. LG scores below the sample average on every single dimension. The largest gaps can be found on Serviceability, Features, and Performance.
+In short, Apple is perceived as the strongest brand across all quality dimensions in this sample, Samsung is middling, and LG consistently underperforms relative to the average respondent's perceptions.
+
+### - Factor score distributions by brand
+While mean factor scores summarise global tendency, the boxplots below show the full distribution of individual scores per brand and dimension. 
+
+```{r factor-score-boxplot, fig.height=8, fig.width=11}
+# Filter to main three brands, reshape to long format
+reg_data_brand %>%
+  filter(Brand %in% c("Apple","Samsung","LG")) %>%
+  pivot_longer(Serviceability:Durability,
+               names_to = "Dimension", values_to = "Score") %>%
+  mutate(Dimension = gsub("_"," ", Dimension)) %>%
+      # Boxplot per dimension,
+  ggplot(aes(x = Brand, y = Score, fill = Brand)) +
+  geom_boxplot(alpha = 0.8, outlier.size = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  facet_wrap(~ Dimension, nrow = 2) +
+  scale_fill_manual(values = c("Apple"="#2c3e50","Samsung"="#2980b9","LG"="#e74c3c")) +
+  labs(title = "Factor Score Distributions by Brand",
+       subtitle = "Apple vs Samsung vs LG - each quality dimension",
+       x = NULL, y = "Score") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+```
+
+### - Brand-specific regression: Repurchase Intention
+
+To examine whether the drivers of RI differ across brands, separate linear regressions are estimated for Apple, Samsung and LG. 
+
+```{r brand-reg-ri}
+brand_list <- c("Apple","Samsung","LG")
+
+# Fit a separate OLS regression for each brand with RI mean as the dependent variable
+ri_models <- setNames(lapply(brand_list, function(br) {
+  df <- reg_data_brand %>% filter(Brand == br)
+  lm(RI_mean ~ Serviceability + Performance + Aesthetics + Ease_of_Use +
+               Material_Quality + Reliability + Features + Durability, data = df)
+}), brand_list)
+
+# print regression summary for each brand with sample size
+for (br in brand_list) {
+  n_br <- nrow(reg_data_brand %>% filter(Brand == br))
+  cat("\n--- Brand:", br, " (n =", n_br, ") ---\n")
+  print(summary(ri_models[[br]]))
+}
+```
+
+### - RI coefficient comparison: Apple vs Samsung vs LG
+The table below summarises the three brand-specific regression results into a single comparison table.
+
+```{r ri-comparison-table}
+# helper function to convert p-values to significance stars
+sig_stars <- function(p) {
+  case_when(p < .001 ~ "***", p < .01 ~ "**", p < .05 ~ "*",
+            p < .10  ~ "t",   TRUE    ~ "")
+}
+
+# extract coefficients and significance stars for each brand into separate tables
+ri_tabs <- lapply(brand_list, function(br) {
+  tidy(ri_models[[br]]) %>%
+    filter(term != "(Intercept)") %>%
+    transmute(
+      Dimension              = gsub("_"," ", term),
+      !!paste0(br,"_b")    := round(estimate, 3),
+      !!paste0(br,"_sig")  := sig_stars(p.value)
+    )
+})
+
+# Join all three brand tables for better comparison
+ri_tabs[[1]] %>%
+  left_join(ri_tabs[[2]], by = "Dimension") %>%
+  left_join(ri_tabs[[3]], by = "Dimension") %>%
+  kbl(caption = "RI Regression Coefficients by Brand",
+      align = "lcccccc") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE) %>%
+  footnote(general = "t p<.10 | * p<.05 | ** p<.01 | *** p<.001")
+```
+
+
+**Interpretation of brand differences:**
+
+**Apple:** Serviceability, Performance, and Ease of Use drive RI, consistent with Apple's positioning around seamless user experience and premium support.
+
+**Samsung:** Performance, Ease of Use, and Durability drive RI. Samsung customers stay loyal because the phone performs reliably, is easy to use, and lasts, with Durability being the strongest predictor.
+
+**LG:** Material Quality is the primary driver of repurchase intention. LG scores below average on Serviceability, which may limit its ability to convert satisfaction into repeat purchase. Results should be interpreted with caution given the smaller LG subsample.
+
+### - Points of parity and points of difference summary
+
+To identify competitive positioning across brands, we combine both previously obtained results in a table below. Each quality dimension is classified based on whether it significantly predicts RI (p < .05) for each brand, combined with whether the brand scores above or below the cross-brand average on that dimension. 
+
+```{r pop-pod-table}
+
+# Helper: extract RI significance per brand (p < .05 threshold)
+get_sig <- function(model, brand) {
+  tidy(model) %>%
+    filter(term != "(Intercept)") %>%
+    transmute(
+      Dimension = gsub("_", " ", term),
+      !!paste0(brand, "_RI_sig") := ifelse(p.value < .05, "Sig.*", "—")
+    )
+}
+
+# Extract significance for each brand
+ri_sig_apple   <- get_sig(ri_models[["Apple"]],   "Apple")
+ri_sig_samsung <- get_sig(ri_models[["Samsung"]], "Samsung")
+ri_sig_lg      <- get_sig(ri_models[["LG"]],      "LG")
+
+# Mean score direction per brand (above/below 0 = above/below cross-brand mean)
+mean_direction <- brand_means %>%
+  filter(Brand %in% c("Apple","Samsung","LG")) %>%
+  pivot_longer(-Brand, names_to = "Dimension", values_to = "Score") %>%
+  mutate(Dimension = gsub("_"," ", Dimension),
+         Direction = case_when(Score >  0.05 ~ "Above avg.",
+                               Score < -0.05 ~ "Below avg.",
+                               TRUE          ~ "Near avg.")) %>%
+  select(Brand, Dimension, Direction) %>%
+  pivot_wider(names_from = Brand, values_from = Direction,
+              names_glue = "{Brand}_Score")
+
+# Join significance and score direction, then classify each dimension per brand:
+# PoP = significant for both Apple and Samsung (shared driver)
+# Apple/Samsung Advantage = significant for one brand only
+# LG Differentiator = only significant for LG
+pop_pod <- ri_sig_apple %>%
+  left_join(ri_sig_samsung, by = "Dimension") %>%
+  left_join(ri_sig_lg,      by = "Dimension") %>%
+  left_join(mean_direction,  by = "Dimension") %>%
+  mutate(
+    Classification = case_when(
+      Apple_RI_sig == "Sig.*" & Samsung_RI_sig == "Sig.*" ~ "Point of Parity (RI)",
+      Apple_RI_sig == "Sig.*" & Samsung_RI_sig == "—"     ~ "Apple Advantage",
+      Apple_RI_sig == "—"     & Samsung_RI_sig == "Sig.*" ~ "Samsung Advantage",
+      LG_RI_sig    == "Sig.*"                             ~ "LG Differentiator",
+      TRUE                                                ~ "Not significant"
+    )
+  ) %>%
+  select(Dimension, Apple_Score, Samsung_Score, LG_Score,
+         Apple_RI_sig, Samsung_RI_sig, LG_RI_sig, Classification)
+# show table
+pop_pod %>%
+  kbl(
+    col.names = c("Dimension",
+                  "Apple Score", "Samsung Score", "LG Score",
+                  "Apple RI*", "Samsung RI*", "LG RI*",
+                  "Classification"),
+    caption = "Points of Parity and Difference: Mean Factor Scores + RI Regression Significance"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(8, bold = TRUE,
+              color = case_when(
+                pop_pod$Classification == "Point of Parity (RI)" ~ "#2980b9",
+                pop_pod$Classification == "Apple Advantage"      ~ "#27ae60",
+                pop_pod$Classification == "Samsung Advantage"    ~ "#e67e22",
+                pop_pod$Classification == "LG Differentiator"    ~ "#c0392b",
+                TRUE                                             ~ "grey50"
+              )) %>%
+  footnote(general = "Score direction: Above/Below/Near the cross-brand mean. RI* = significant RI predictor (p < .05)")
+```
+
+Dimensions significant for both Apple and Samsung are classified as points of parity. Dimensions significant for only one brand represent that brand's competitive advantage. LG differentiators are dimensions uniquely driving LG's repurchase intention.
+
+# Appendix {-}
+
+## Declaration on the Use of Generative AI Tools {-}
+
+AI tools were used during the preparation of this report to improve workflow efficiency, particularly for coding support and for formatting tables, graphics, and results in the HTML output. Claude was consulted to assist with technical implementation and visual presentation.
+
+The analysis itself, including the choice of methods, interpretation of findings, and final conclusions, was carried out independently by the authors.
+
